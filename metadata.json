@@ -1,0 +1,6 @@
+{
+  "name": "Scriptura RAG - Bilingual Biblical Semantic Retrieval",
+  "description": "Cross-lingual semantic search, verse comparison, and theological Q&A across KJV and Reina-Valera 1960 with vector embeddings and knowledge base architecture guide.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
