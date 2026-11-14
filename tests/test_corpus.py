@@ -1,12 +1,20 @@
-"""Parser tests on synthetic pages that reproduce the layouts of the two PDFs."""
+"""Parsers: synthetic pages reproducing each PDF layout, then the real PDFs (marker `pdf`)."""
 
+from collections import defaultdict
+
+import pytest
+
+from bible_rag.config import Settings
 from bible_rag.corpus import (
+    BOOKS,
     VERSIONS,
+    Passage,
     Unit,
     _strip_opening,
     chunk_units,
-    format_reference,
+    extract_pages,
     join_units_text,
+    load_version,
     normalize,
     parse_kjv,
     parse_rvr,
@@ -53,9 +61,11 @@ def test_normalize_folds_ligatures():
     assert normalize("dĳo ediﬁcó") == "dijo edificó"
 
 
-def test_format_reference():
-    assert format_reference("Juan", 3, 16, 16) == "Juan 3:16"
-    assert format_reference("John", 3, 16, 18) == "John 3:16-18"
+def test_reference_format():
+    p = Passage("KJV", "en", "John", 3, 16, 16, "x", 1, "NT")
+    assert (p.reference, p.citation) == ("John 3:16", "John 3:16 (KJV)")
+    p.verse_end = 18
+    assert p.reference == "John 3:16-18" and p.embedding_text() == "John 3:16-18: x"
 
 
 def test_join_units_text_rejoins_hyphenated_words():
@@ -201,7 +211,7 @@ def test_rvr_soft_hyphen_with_hidden_margin_number():
 def test_chunks_respect_size_overlap_and_chapters():
     units = [Unit("John", 3, v, v, f"verse {v} " + "x" * 40, 10, "NT") for v in range(1, 11)]
     units += [Unit("John", 4, 1, 1, "new chapter", 12, "NT")]
-    chunks = list(chunk_units(units, VERSIONS["kjv"], chunk_size=150, chunk_overlap=60))
+    chunks = list(chunk_units(units, VERSIONS["kjv"], 150, 60))
     assert all(len(c.text) <= 150 for c in chunks)
     assert all(c.chapter == 3 for c in chunks[:-1]) and chunks[-1].reference == "John 4:1"
     # consecutive chunks overlap by one verse
@@ -240,3 +250,68 @@ def test_strip_opening_layouts():
     assert _strip_opening(["lamentaciones de", "jeremias", "¡Cómo ha quedado sola! 1"]) == [
         "¡Cómo ha quedado sola! 1"
     ]
+
+
+# ------------------------------------------------------------------ real PDFs (~40 s)
+DATA = Settings().data_dir
+TITLES = (
+    "libro primero",
+    "libro segundo",
+    "libro tercero",
+    "libro cuarto",
+    "libro quinto",
+    "primer libro",
+    "segundo libro",
+    "santo evangelio",
+    "epístola del apóstol",
+    "epístola universal",
+)
+pdf = pytest.mark.skipif(not (DATA / "kjv.pdf").exists(), reason="PDFs not found")
+
+
+def structure(units):
+    """[books], {(book, chapter): last verse} without the Apocrypha."""
+    chapters = defaultdict(int)
+    for u in units:
+        if u.section != "Apocrypha":
+            chapters[u.book, u.chapter] = max(chapters[u.book, u.chapter], u.verse_end)
+    return list(dict.fromkeys(b for b, _ in chapters)), chapters
+
+
+@pytest.fixture(scope="module")
+def real():
+    return {
+        "kjv": structure(parse_kjv(extract_pages(DATA / "kjv.pdf"))),
+        "rvr": structure(parse_rvr(extract_pages(DATA / VERSIONS["rvr1960"].filename))),
+    }
+
+
+@pytest.mark.pdf
+@pdf
+def test_real_pdfs_match_the_canon(real):
+    books, chapters = real["kjv"]
+    assert len(books) == 66 and len(chapters) == 1189 and sum(chapters.values()) == 31102
+    assert chapters["Psalm", 119] == 176 and chapters["John", 3] == 36
+    rvr_books, rvr_chapters = real["rvr"]
+    assert [b for b, _ in BOOKS] == books and [b for _, b in BOOKS] == rvr_books
+    to_kjv = dict(zip(rvr_books, books, strict=True))
+    diffs = {
+        k: (v, chapters[to_kjv[k[0]], k[1]])
+        for k, v in rvr_chapters.items()
+        if chapters[to_kjv[k[0]], k[1]] != v
+    }
+    # genuine: 3 John has 15 verses in RVR1960; this PDF prints a stray "10" in Psalm 47
+    assert diffs == {("3 Juan", 1): (15, 14), ("Salmos", 47): (10, 9)}
+
+
+@pytest.mark.pdf
+@pdf
+def test_real_passages_are_clean():
+    for version in VERSIONS:
+        passages = load_version(version, DATA, 450, 80)
+        assert len(passages) > 9000
+        for p in passages:
+            assert len(p.text) <= 600 and "Jeho-vá" not in p.text, p.citation
+            assert not any(c in p.text for c in "\ufffe\u00ad\u0133\ufb01"), p.citation
+            if p.chapter == 1 and p.verse_start == 1:  # no book title leaked into the text
+                assert not any(t in p.text[:80].lower() for t in TITLES), p.citation

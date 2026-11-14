@@ -1,7 +1,4 @@
-"""Runtime settings, read from environment variables (and an optional ``.env`` file).
-
-Every field can be overridden with ``BIBLE_RAG_<FIELD_NAME>``; see ``.env.example``.
-"""
+"""Settings: defaults < .env < BIBLE_RAG_<FIELD> environment variables < explicit overrides."""
 
 from __future__ import annotations
 
@@ -9,83 +6,59 @@ import os
 from dataclasses import dataclass, fields
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ENV_PREFIX = "BIBLE_RAG_"
-
-
-def _parse_bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass
 class Settings:
-    # Data / index locations (relative paths are resolved against the project root)
-    data_dir: Path = PROJECT_ROOT / "src" / "data"
-    index_dir: Path = PROJECT_ROOT / "storage" / "index"
+    data_dir: Path = ROOT / "src" / "data"  # the two PDFs
+    index_dir: Path = ROOT / "storage" / "index"  # <embedder>/<version>/
+    model_cache_dir: Path = ROOT / "storage" / "models"  # converted GGUF fallback
     versions: tuple[str, ...] = ("kjv", "rvr1960")
-    include_apocrypha: bool = False  # the KJV PDF includes it, RVR1960 does not
+    include_apocrypha: bool = False  # only the KJV PDF has it
 
-    # Chunking. paraphrase-multilingual-MiniLM-L12-v2 truncates at 128 tokens
-    # (~450-500 chars), so larger chunks would be silently cut when embedded.
+    # 450 chars ~ the 128-token limit of the MiniLM embedder
     chunk_size: int = 450
     chunk_overlap: int = 80
 
-    # Preferred models (same as RAG0.ipynb)
+    # Preferred models (as in RAG0.ipynb); chains are tried in order, see models.py
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     llm_model: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    embedding_chain: tuple[str, ...] = ()  # default: hf:<embedding_model>, usem3
+    llm_chain: tuple[str, ...] = ()  # default: hf:<llm_model>, ollama, openai, smollm2, extractive
     device: str = "auto"  # auto | cpu | cuda | mps
 
-    # Fallback chains, tried in order (see README "Model fallback"). Empty = defaults:
-    #   embeddings: hf:<embedding_model>, usem3
-    #   LLM:        hf:<llm_model>, ollama, openai, smollm2, extractive
-    embedding_chain: tuple[str, ...] = ()
-    llm_chain: tuple[str, ...] = ()
-
-    # Local OpenAI-compatible servers (free, self-hosted)
-    ollama_url: str = "http://127.0.0.1:11434"
-    ollama_model: str = ""  # empty = first model reported by `ollama list`
-    openai_base_url: str = ""  # e.g. LM Studio http://127.0.0.1:1234/v1, llama.cpp server
-    openai_model: str = ""
+    # Free local servers speaking the OpenAI API
+    ollama_url: str = "http://127.0.0.1:11434/v1"
+    openai_base_url: str = ""  # LM Studio, llama.cpp server, vLLM...
     openai_api_key: str = ""
     connect_timeout: float = 3.0
 
-    # Where converted models are cached (the bundled GGUF fallback is converted once)
-    model_cache_dir: Path = PROJECT_ROOT / "storage" / "models"
-
-    # Retrieval / generation
-    retrieval: str = "hybrid"  # hybrid (embeddings + BM25 keywords) | dense
-    top_k: int = 3  # passages retrieved *per version*
+    retrieval: str = "hybrid"  # hybrid (embeddings + BM25) | dense
+    top_k: int = 3  # passages per version
     max_new_tokens: int = 512
-    temperature: float = 0.2  # 0 = greedy decoding
+    temperature: float = 0.2  # 0 = greedy
     top_p: float = 0.9
 
-    # HTTP service
-    host: str = "127.0.0.1"
-    port: int = 8000
-    server_url: str | None = None  # when set, `ask`/`chat` use the running service
-
     @classmethod
-    def from_env(cls, env_file: Path | None = None, **overrides) -> Settings:
-        """Build settings from defaults < .env < environment < explicit overrides."""
+    def from_env(cls, **overrides) -> Settings:
         try:
             from dotenv import load_dotenv
 
-            load_dotenv(env_file or PROJECT_ROOT / ".env", override=False)
-        except ImportError:  # pragma: no cover - python-dotenv is a dependency
+            load_dotenv(ROOT / ".env")
+        except ImportError:
             pass
-
-        values: dict = {}
+        values = {}
         for f in fields(cls):
-            raw = os.environ.get(ENV_PREFIX + f.name.upper())
-            if raw is None or raw == "":
-                continue
-            values[f.name] = _coerce(f.name, raw, getattr(cls(), f.name))
+            raw = os.environ.get(f"BIBLE_RAG_{f.name.upper()}")
+            if raw:
+                values[f.name] = _coerce(raw, f.default)
         values.update({k: v for k, v in overrides.items() if v is not None})
-        settings = cls(**values)
-        settings.data_dir = _resolve(settings.data_dir)
-        settings.index_dir = _resolve(settings.index_dir)
-        settings.model_cache_dir = _resolve(settings.model_cache_dir)
-        return settings
+        s = cls(**values)
+        for name in ("data_dir", "index_dir", "model_cache_dir"):
+            path = Path(getattr(s, name)).expanduser()
+            setattr(s, name, path if path.is_absolute() else ROOT / path)
+        return s
 
     @property
     def embedding_specs(self) -> list[str]:
@@ -108,25 +81,12 @@ class Settings:
 
         if torch.cuda.is_available():
             return "cuda"
-        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-            return "mps"
-        return "cpu"
+        return "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-def _resolve(path: Path | str) -> Path:
-    path = Path(path).expanduser()
-    return path if path.is_absolute() else PROJECT_ROOT / path
-
-
-def _coerce(name: str, raw: str, default):
+def _coerce(raw: str, default):
     if isinstance(default, bool):
-        return _parse_bool(raw)
-    if isinstance(default, int):
-        return int(raw)
-    if isinstance(default, float):
-        return float(raw)
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
     if isinstance(default, tuple):
         return tuple(v.strip() for v in raw.split(",") if v.strip())
-    if isinstance(default, Path):
-        return Path(raw)
-    return raw
+    return type(default)(raw) if isinstance(default, int | float | Path) else raw

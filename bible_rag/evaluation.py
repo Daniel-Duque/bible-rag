@@ -1,27 +1,18 @@
-"""Measure whether the system is useful: `bible-rag eval`.
-
-Each question (asked in English and in Spanish) has the chapters that answer it. We report
-
-* **retrieval hit rate**: share of questions where at least one of the top-k passages of a
-  translation lies in a gold chapter, per question language x translation;
-* **answers** (unless ``--retrieval-only``): which model answered, whether the answer cites a
-  gold passage that the grounding check verified, and how many references/quotes could
-  *not* be verified in the retrieved passages (likely hallucinations).
-"""
+"""`bible-rag eval`: 16 questions (in English and Spanish) with the chapters that answer them.
+Reports the retrieval hit rate per question language x translation and, for answers, how often
+a correct passage is cited (verified) and how often something unverifiable is claimed."""
 
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass, field
 
 from .corpus import BOOKS
 from .grounding import book_index
-from .rag import BibleRAG
 
 _IDX = {en: i for i, (en, _) in enumerate(BOOKS)}
 
-# (english question, spanish question, gold chapters as (KJV book name, chapter))
-GOLD: list[tuple[str, str, list[tuple[str, int]]]] = [
+# (English question, Spanish question, gold chapters as (KJV book, chapter))
+GOLD = [
     (
         "Who built the ark and why?",
         "¿Quién construyó el arca y por qué?",
@@ -101,78 +92,57 @@ GOLD: list[tuple[str, str, list[tuple[str, int]]]] = [
 ]
 
 
-def gold_set(gold: list[tuple[str, int]]) -> set[tuple[int, int]]:
-    return {(_IDX[book], chapter) for book, chapter in gold}
-
-
-@dataclass
-class QuestionResult:
-    question: str
-    language: str
-    retrieval_hit: dict[str, bool]  # version label -> hit
-    top_sources: list[str]
-    model: str | None = None
-    answer: str | None = None
-    cites_gold: bool | None = None
-    unsupported: list[str] = field(default_factory=list)
-    seconds: float | None = None
-
-
-def evaluate(
-    rag: BibleRAG,
-    k: int | None = None,
-    answers: bool = True,
-    languages: tuple[str, ...] = ("en", "es"),
-    progress=None,
-) -> dict:
-    results: list[QuestionResult] = []
-    for en_q, es_q, gold in GOLD:
-        gold_chapters = gold_set(gold)
-        for lang, question in (("en", en_q), ("es", es_q)):
-            if lang not in languages:
-                continue
+def evaluate(rag, k: int | None = None, answers: bool = True, progress=None) -> dict:
+    rows = []
+    for en, es, gold in GOLD:
+        chapters = {(_IDX[book], ch) for book, ch in gold}
+        for lang, question in (("en", en), ("es", es)):
             hits = rag.search(question, k)
-            per_version: dict[str, bool] = {}
+            row = {
+                "question": question,
+                "language": lang,
+                "hit": {},
+                "sources": [h.passage.citation for h in hits[:4]],
+            }
             for h in hits:
-                in_gold = (book_index(h.passage.book), h.passage.chapter) in gold_chapters
-                version = h.passage.version
-                per_version[version] = per_version.get(version, False) or in_gold
-            r = QuestionResult(question, lang, per_version, [h.passage.citation for h in hits[:4]])
+                in_gold = (book_index(h.passage.book), h.passage.chapter) in chapters
+                row["hit"][h.passage.version] = row["hit"].get(h.passage.version, False) or in_gold
             if answers:
                 t0 = time.perf_counter()
                 a = rag.ask(question, k)
-                r.seconds = round(time.perf_counter() - t0, 1)
-                r.model, r.answer = a.model, a.answer
-                r.unsupported = [c.text for c in a.grounding.unsupported]
-                supported = [c for c in a.grounding.references + a.grounding.quotes if c.supported]
-                r.cites_gold = any(c.location in gold_chapters for c in supported)
-            results.append(r)
+                verified = [c for c in a.grounding.references + a.grounding.quotes if c.supported]
+                row |= {
+                    "model": a.model,
+                    "answer": a.text,
+                    "seconds": round(time.perf_counter() - t0, 1),
+                    "cites_gold": any(c.location in chapters for c in verified),
+                    "unverified": [c.text for c in a.grounding.unsupported],
+                }
+            rows.append(row)
             if progress:
-                progress(r)
-    return {"summary": summarize(results), "questions": [asdict(r) for r in results]}
+                progress(row)
+    return {"summary": summarize(rows), "questions": rows}
 
 
-def summarize(results: list[QuestionResult]) -> dict:
-    summary: dict = {"questions": len(results), "retrieval_hit_rate": {}}
-    for lang in sorted({r.language for r in results}):
-        rows = [r for r in results if r.language == lang]
-        for version in sorted({v for r in rows for v in r.retrieval_hit}):
-            hits = [r.retrieval_hit.get(version, False) for r in rows]
-            summary["retrieval_hit_rate"][f"{lang}->{version}"] = round(sum(hits) / len(hits), 3)
-        any_hit = [any(r.retrieval_hit.values()) for r in rows]
-        summary["retrieval_hit_rate"][f"{lang}->any"] = round(sum(any_hit) / len(any_hit), 3)
-    answered = [r for r in results if r.model is not None]
-    if answered:
+def summarize(rows: list[dict]) -> dict:
+    def rate(flags):
+        flags = list(flags)
+        return round(sum(flags) / len(flags), 3) if flags else None
+
+    hit_rate = {}
+    for lang in sorted({r["language"] for r in rows}):
+        rs = [r for r in rows if r["language"] == lang]
+        for version in sorted({v for r in rs for v in r["hit"]}):
+            hit_rate[f"{lang}->{version}"] = rate(r["hit"].get(version, False) for r in rs)
+        hit_rate[f"{lang}->any"] = rate(any(r["hit"].values()) for r in rs)
+    summary = {"questions": len(rows), "retrieval_hit_rate": hit_rate}
+    if answered := [r for r in rows if "model" in r]:
         summary["answers"] = {
             "models": {
-                m: sum(r.model == m for r in answered) for m in sorted({r.model for r in answered})
+                m: sum(r["model"] == m for r in answered) for m in {r["model"] for r in answered}
             },
-            "cites_gold_passage": round(
-                sum(bool(r.cites_gold) for r in answered) / len(answered), 3
-            ),
-            "with_unverified_claims": round(
-                sum(bool(r.unsupported) for r in answered) / len(answered), 3
-            ),
-            "avg_seconds": round(sum(r.seconds or 0 for r in answered) / len(answered), 1),
+            "cites_gold_passage": rate(r["cites_gold"] for r in answered),
+            "with_unverified_claims": rate(bool(r["unverified"]) for r in answered),
+            "avg_seconds": round(sum(r["seconds"] for r in answered) / len(answered), 1),
         }
     return summary
