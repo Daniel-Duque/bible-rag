@@ -1,4 +1,9 @@
-"""Build the per-version FAISS indexes from the PDFs (notebook steps 1-3)."""
+"""Build the per-version FAISS indexes from the PDFs (notebook steps 1-3).
+
+Indexes live in ``<index_dir>/<embedder>/<version>``. The first embedder of the chain that
+loads is used, so ingestion works offline (falling back to the bundled USE-multilingual
+encoder) and can be re-run later with the preferred model to add a better index.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +13,21 @@ import time
 
 from .config import Settings
 from .corpus import VERSIONS, load_version
-from .index import Embedder, VersionIndex
+from .index import Embedder, VersionIndex, embedder_key, load_embedder
+from .llm import describe_error
 
 log = logging.getLogger(__name__)
+
+
+def pick_embedder(settings: Settings, specs: list[str] | None = None) -> tuple[str, Embedder]:
+    errors = []
+    for spec in specs or settings.embedding_specs:
+        try:
+            return spec, load_embedder(spec, settings.resolve_device(), settings.connect_timeout)
+        except Exception as e:  # noqa: BLE001 - try the next one
+            log.warning("Embedder %s unavailable: %s", spec, describe_error(e))
+            errors.append(f"{spec}: {describe_error(e)}")
+    raise RuntimeError("No embedding model could be loaded: " + "; ".join(errors))
 
 
 def ingest(
@@ -18,26 +35,29 @@ def ingest(
     embedder: Embedder | None = None,
     force: bool = False,
     versions: list[str] | None = None,
+    embedder_spec: str | None = None,
 ) -> dict[str, VersionIndex]:
     versions = versions or list(settings.versions)
     for v in versions:
         if v not in VERSIONS:
             raise ValueError(f"Unknown version {v!r}. Known: {', '.join(VERSIONS)}")
 
-    todo = [v for v in versions if force or not (settings.index_dir / v / "manifest.json").exists()]
+    if embedder is None:
+        embedder_spec, embedder = pick_embedder(
+            settings, [embedder_spec] if embedder_spec else None
+        )
+    spec = embedder_spec or embedder.model_name
+    root = settings.index_dir / embedder_key(spec)
+    log.info("Embedding with %s -> %s", spec, root)
+
+    todo = [v for v in versions if force or not (root / v / "manifest.json").exists()]
     built: dict[str, VersionIndex] = {}
     if not todo:
-        log.info("All indexes already exist in %s (use --force to rebuild)", settings.index_dir)
+        log.info("All indexes already exist in %s (use --force to rebuild)", root)
         return built
 
-    if embedder is None:
-        from .index import SentenceTransformerEmbedder
-
-        embedder = SentenceTransformerEmbedder(
-            settings.embedding_model, device=settings.resolve_device()
-        )
-
     params = {
+        "embedder_spec": spec,
         "chunk_size": settings.chunk_size,
         "chunk_overlap": settings.chunk_overlap,
         "include_apocrypha": settings.include_apocrypha,
@@ -58,8 +78,8 @@ def ingest(
             time.perf_counter() - t0,
         )
         index = VersionIndex.build(version, passages, embedder, params)
-        target = settings.index_dir / version
-        tmp = settings.index_dir / f".{version}.tmp"
+        target = root / version
+        tmp = root / f".{version}.tmp"
         shutil.rmtree(tmp, ignore_errors=True)
         index.save(tmp)  # write next to the target, then swap: never leave a half index
         shutil.rmtree(target, ignore_errors=True)

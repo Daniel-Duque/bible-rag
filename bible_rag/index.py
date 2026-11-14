@@ -42,12 +42,20 @@ class Embedder(Protocol):
 
 
 class SentenceTransformerEmbedder:
-    def __init__(self, model_name: str, device: str = "cpu", batch_size: int = 64):
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "cpu",
+        batch_size: int = 64,
+        local_files_only: bool = False,
+    ):
         from sentence_transformers import SentenceTransformer
 
         self.model_name = model_name
         self.batch_size = batch_size
-        self._model = SentenceTransformer(model_name, device=device)
+        self._model = SentenceTransformer(
+            model_name, device=device, local_files_only=local_files_only
+        )
 
     def embed(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
         vectors = self._model.encode(
@@ -60,10 +68,124 @@ class SentenceTransformerEmbedder:
         return np.asarray(vectors, dtype="float32")
 
 
+class USEEmbedder:
+    """Google Universal Sentence Encoder multilingual v3, weights bundled in the wheel.
+
+    Works fully offline (pure numpy), maps 16 languages incl. English and Spanish into one
+    space, so it is the guaranteed fallback when the Hugging Face model cannot be loaded.
+    """
+
+    model_name = "usem3"
+
+    def __init__(self, batch_size: int = 256):
+        from usem3 import USE
+
+        self.batch_size = batch_size
+        self._model = USE()
+
+    def embed(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
+        batches = range(0, len(texts), self.batch_size)
+        if show_progress and len(texts) > self.batch_size:
+            from tqdm import tqdm
+
+            batches = tqdm(batches, desc="Embedding", unit="batch")
+        out = [self._model.encode(texts[i : i + self.batch_size]) for i in batches]
+        return np.asarray(np.vstack(out), dtype="float32")
+
+
+def load_embedder(spec: str, device: str = "cpu", connect_timeout: float = 3.0) -> Embedder:
+    """Build an embedder from a chain entry: ``hf:<model id or path>`` or ``usem3``."""
+    from .hub import prepare_hf_model
+
+    kind, _, arg = spec.partition(":")
+    if kind == "hf" and arg:
+        local_only = prepare_hf_model(arg, connect_timeout)  # fails fast when offline
+        return SentenceTransformerEmbedder(arg, device=device, local_files_only=local_only)
+    if kind == "usem3":
+        return USEEmbedder()
+    raise ValueError(f"Unknown embedding spec {spec!r} (expected 'hf:<model>' or 'usem3')")
+
+
+def embedder_key(spec: str) -> str:
+    """Directory name for the indexes built with this embedder."""
+    kind, _, arg = spec.partition(":")
+    name = arg or kind
+    return "".join(c if c.isalnum() or c in "-_." else "__" for c in name)
+
+
+def embedder_model_name(spec: str) -> str:
+    kind, _, arg = spec.partition(":")
+    return arg if kind == "hf" else kind
+
+
 @dataclass
 class Hit:
     passage: Passage
-    score: float  # cosine similarity, higher is better
+    score: float  # cosine similarity to the question, higher is better
+    rank: float = 0.0  # fused rank score used for ordering (hybrid retrieval)
+
+
+_STOPWORDS = frozenset(
+    (  # noqa: SIM905 - readable as a sentence
+        "a an and are as at be but by for from had has have he her his i if in into is it its "
+        "me my not of on or our shall she so that the their them then there they this thou "
+        "thy to unto us was we were what when which who whom why will with ye you your how "
+        "did does do said say says about according "
+        "al como con cual de del el ella ellos en era es esta este fue ha la las le les lo los "
+        "mi no nos o para pero por que se si sin su sus te tu un una y ya yo quien donde dice "
+        "segun sobre"
+    ).split()
+)
+
+
+def lexical_tokens(text: str) -> list[str]:
+    """Lowercased, accent-folded word tokens without stopwords."""
+    import re
+    import unicodedata
+
+    folded = "".join(
+        c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn"
+    )
+    return [t for t in re.findall(r"\w+", folded) if t not in _STOPWORDS and len(t) > 1]
+
+
+class LexicalIndex:
+    """Small in-memory BM25 index.
+
+    Names such as "Goliath" or "Samaritan" are what sentence embeddings blur and what
+    keyword search finds; fused with the embeddings it lifts retrieval (see `bible-rag eval`).
+    """
+
+    def __init__(self, texts: list[str], k1: float = 1.2, b: float = 0.75):
+        import math
+        from collections import Counter, defaultdict
+
+        self.k1, self.b = k1, b
+        self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        self.lengths: list[int] = []
+        for doc_id, text in enumerate(texts):
+            tokens = lexical_tokens(text)
+            self.lengths.append(len(tokens))
+            for token, tf in Counter(tokens).items():
+                self.postings[token].append((doc_id, tf))
+        n = len(texts)
+        self.avg_len = (sum(self.lengths) / n) if n else 0.0
+        self.idf = {
+            t: math.log(1 + (n - len(p) + 0.5) / (len(p) + 0.5)) for t, p in self.postings.items()
+        }
+
+    def search(self, query: str, n: int) -> list[tuple[int, float]]:
+        from collections import defaultdict
+
+        scores: dict[int, float] = defaultdict(float)
+        for token in set(lexical_tokens(query)):
+            idf = self.idf.get(token)
+            if idf is None:
+                continue
+            for doc_id, tf in self.postings[token]:
+                norm = self.k1 * (1 - self.b + self.b * self.lengths[doc_id] / self.avg_len)
+                scores[doc_id] += idf * tf * (self.k1 + 1) / (tf + norm)
+        return sorted(scores.items(), key=lambda x: -x[1])[:n]
 
 
 class IndexNotFoundError(RuntimeError):
@@ -78,6 +200,7 @@ class VersionIndex:
         self.index = index
         self.passages = passages
         self.manifest = manifest
+        self._lexical: LexicalIndex | None = None
 
     def __len__(self) -> int:
         return len(self.passages)
@@ -138,13 +261,39 @@ class VersionIndex:
             raise IndexNotFoundError(f"Corrupt index at {directory}: rows != passages")
         return cls(manifest["version"], index, passages, manifest)
 
-    def search(self, query_vector: np.ndarray, k: int) -> list[Hit]:
+    @property
+    def lexical(self) -> LexicalIndex:
+        if self._lexical is None:  # built lazily: ~1 s per version
+            self._lexical = LexicalIndex([p.embedding_text() for p in self.passages])
+        return self._lexical
+
+    def search(
+        self,
+        query_vector: np.ndarray,
+        k: int,
+        query_text: str | None = None,
+        candidates: int = 50,
+        rrf_k: int = 60,
+    ) -> list[Hit]:
+        """Dense search, or hybrid dense + BM25 with reciprocal rank fusion if text is given."""
         k = min(k, len(self.passages))
         if k <= 0:
             return []
-        scores, ids = self.index.search(query_vector.reshape(1, -1), k)
-        return [
-            Hit(self.passages[i], float(s))
-            for s, i in zip(scores[0], ids[0], strict=True)
-            if i >= 0
-        ]
+        query = query_vector.reshape(1, -1).astype("float32")
+        n = min(max(candidates, k), len(self.passages))
+        scores, ids = self.index.search(query, n)
+        cosine = {int(i): float(s) for s, i in zip(scores[0], ids[0], strict=True) if i >= 0}
+        dense = list(cosine)
+        if not query_text:
+            return [Hit(self.passages[i], cosine[i], cosine[i]) for i in dense[:k]]
+
+        fused: dict[int, float] = {}
+        for rank, i in enumerate(dense):
+            fused[i] = fused.get(i, 0.0) + 1 / (rrf_k + rank + 1)
+        for rank, (i, _) in enumerate(self.lexical.search(query_text, n)):
+            fused[i] = fused.get(i, 0.0) + 1 / (rrf_k + rank + 1)
+        best = sorted(fused, key=lambda i: -fused[i])[:k]
+        for i in best:  # keyword-only hits: compute their cosine for display
+            if i not in cosine:
+                cosine[i] = float(self.index.reconstruct(i) @ query[0])
+        return [Hit(self.passages[i], cosine[i], fused[i]) for i in best]

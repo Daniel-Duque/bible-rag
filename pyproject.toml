@@ -11,9 +11,14 @@ dependencies = [
     "sentence-transformers>=3.0",
     "numpy>=1.26",
     "pypdfium2>=4.30",
+    # Offline embedding fallback: Google USE-multilingual v3 weights bundled in the wheel
+    # (pure numpy, Apache-2.0). Used when the Hugging Face embedder cannot be downloaded.
+    "fast-universal-sentence-encoder>=0.2.1",
     # Generation: same local LLM as the notebook (Qwen2.5-1.5B-Instruct)
     "torch>=2.2",
     "transformers>=4.56",
+    "accelerate>=0.34",  # required by transformers to load GGUF files
+    "gguf>=0.10",  # GGUF reader, for the bundled fallback LLM
     # Service / CLI
     "fastapi>=0.110",
     "uvicorn>=0.29",
@@ -25,10 +30,22 @@ dependencies = [
 bible-rag = "bible_rag.cli:main"
 
 [dependency-groups]
+# Offline fallback LLM: SmolLM2-135M-Instruct (Q4_1 GGUF, Apache-2.0) shipped inside the
+# `llm-smollm2` wheel by Simon Willison. Only the .gguf file is used, loaded with transformers;
+# the package's own runtime deps (the `llm` CLI and llama-cpp-python, which needs a C++ build)
+# are neutralised below.
+fallback-llm = ["llm-smollm2==0.1.2"]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
     "ipykernel>=6",
+]
+
+[tool.uv]
+default-groups = ["dev", "fallback-llm"]
+override-dependencies = [
+    "llama-cpp-python; sys_platform == 'never'",
+    "llm; sys_platform == 'never'",
 ]
 
 [build-system]

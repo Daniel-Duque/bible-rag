@@ -3,6 +3,7 @@
 from bible_rag.corpus import (
     VERSIONS,
     Unit,
+    _strip_opening,
     chunk_units,
     format_reference,
     join_units_text,
@@ -218,3 +219,24 @@ def test_resolve_line_hyphens_uses_the_corpus():
     ]
     text = join_units_text(resolve_line_hyphens(units))
     assert text == "Y habló Jehová a Moisés. Jehová dijo y llegó a Bet-el, y de Bet-el salió"
+
+
+def test_strip_opening_layouts():
+    # title + drop cap + lowercase continuation
+    assert _strip_opening(["libro primero de moisés", "génesis", "E", "n el principio 1"]) == [
+        "En el principio 1"
+    ]
+    # accent line + drop cap + margin verse number before the continuation
+    assert _strip_opening(["deuteronomio", "\u0301", "E", "1 stas son las palabras"]) == [
+        "1 Éstas son las palabras"
+    ]
+    assert _strip_opening(["joel", "P", "1, 2 alabra de Jehová", "esto"]) == [
+        "1, 2 Palabra de Jehová",
+        "esto",
+    ]
+    # capitalised title
+    assert _strip_opening(["Rut", "A", "conteció en los días 1"]) == ["Aconteció en los días 1"]
+    # no drop cap at all
+    assert _strip_opening(["lamentaciones de", "jeremias", "¡Cómo ha quedado sola! 1"]) == [
+        "¡Cómo ha quedado sola! 1"
+    ]

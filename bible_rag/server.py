@@ -38,9 +38,16 @@ def create_app(rag: BibleRAG) -> FastAPI:
             raise HTTPException(400, str(e)) from e
         return {"question": q.question, "sources": [hit_to_dict(h) for h in hits]}
 
+    @app.get("/models")
+    def models() -> list[dict]:
+        """Availability of every embedder / LLM in the fallback chains."""
+        from .probe import as_dicts, probe_all
+
+        return as_dicts(probe_all(rag.settings))
+
     @app.post("/ask")
     async def ask(q: Query) -> dict:
-        if rag.llm is None:
+        if rag.chain is None:
             raise HTTPException(503, "Service started without an LLM (--no-llm); use /search")
         try:
             answer = await run_in_threadpool(rag.ask, q.question, q.k, q.versions)

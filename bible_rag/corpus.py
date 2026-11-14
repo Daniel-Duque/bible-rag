@@ -56,6 +56,77 @@ VERSIONS: dict[str, VersionSpec] = {
 }
 
 
+# Canonical order; names exactly as the parsers produce them (KJV, RVR1960).
+BOOKS: list[tuple[str, str]] = [
+    ("Genesis", "Génesis"),
+    ("Exodus", "Éxodo"),
+    ("Leviticus", "Levítico"),
+    ("Numbers", "Números"),
+    ("Deuteronomy", "Deuteronomio"),
+    ("Joshua", "Josué"),
+    ("Judges", "Jueces"),
+    ("Ruth", "Rut"),
+    ("1 Samuel", "1 Samuel"),
+    ("2 Samuel", "2 Samuel"),
+    ("1 Kings", "1 Reyes"),
+    ("2 Kings", "2 Reyes"),
+    ("1 Chronicles", "1 Crónicas"),
+    ("2 Chronicles", "2 Crónicas"),
+    ("Ezra", "Esdras"),
+    ("Nehemiah", "Nehemías"),
+    ("Esther", "Ester"),
+    ("Job", "Job"),
+    ("Psalm", "Salmos"),
+    ("Proverbs", "Proverbios"),
+    ("Ecclesiastes", "Eclesiastés"),
+    ("Song of Solomon", "Cantar de los Cantares"),
+    ("Isaiah", "Isaías"),
+    ("Jeremiah", "Jeremías"),
+    ("Lamentations", "Lamentaciones"),
+    ("Ezekiel", "Ezequiel"),
+    ("Daniel", "Daniel"),
+    ("Hosea", "Oseas"),
+    ("Joel", "Joel"),
+    ("Amos", "Amós"),
+    ("Obadiah", "Abdías"),
+    ("Jonah", "Jonás"),
+    ("Micah", "Miqueas"),
+    ("Nahum", "Nahum"),
+    ("Habakkuk", "Habacuc"),
+    ("Zephaniah", "Sofonías"),
+    ("Haggai", "Hageo"),
+    ("Zechariah", "Zacarías"),
+    ("Malachi", "Malaquías"),
+    ("Matthew", "Mateo"),
+    ("Mark", "Marcos"),
+    ("Luke", "Lucas"),
+    ("John", "Juan"),
+    ("Acts", "Hechos"),
+    ("Romans", "Romanos"),
+    ("1 Corinthians", "1 Corintios"),
+    ("2 Corinthians", "2 Corintios"),
+    ("Galatians", "Gálatas"),
+    ("Ephesians", "Efesios"),
+    ("Philippians", "Filipenses"),
+    ("Colossians", "Colosenses"),
+    ("1 Thessalonians", "1 Tesalonicenses"),
+    ("2 Thessalonians", "2 Tesalonicenses"),
+    ("1 Timothy", "1 Timoteo"),
+    ("2 Timothy", "2 Timoteo"),
+    ("Titus", "Tito"),
+    ("Philemon", "Filemón"),
+    ("Hebrews", "Hebreos"),
+    ("James", "Santiago"),
+    ("1 Peter", "1 Pedro"),
+    ("2 Peter", "2 Pedro"),
+    ("1 John", "1 Juan"),
+    ("2 John", "2 Juan"),
+    ("3 John", "3 Juan"),
+    ("Jude", "Judas"),
+    ("Revelation", "Apocalipsis"),
+]
+
+
 @dataclass
 class Passage:
     """A retrievable chunk: a few consecutive verses of one chapter in one version."""
@@ -284,14 +355,32 @@ def _split_markers(line: str) -> tuple[list[int], str]:
 
 
 def _strip_opening(lines: list[str]) -> list[str]:
-    """Drop the book title of an opening page and re-attach the drop cap (``E`` + ``n el...``)."""
-    for i in range(len(lines) - 1):
-        if re.fullmatch(r"[A-ZÁÉÍÓÚÑ]", lines[i]) and re.match(r"[a-záéíóúñ]", lines[i + 1]):
-            cap = lines[i]
-            if i > 0 and lines[i - 1] in ("´", "\u0301", "'"):  # "´" + "E" -> "É"
+    """Drop the book title of an opening page and re-attach the drop cap.
+
+    Layouts seen in the PDF (title lines are small caps, i.e. lowercase text)::
+
+        libro primero de moisés / génesis / E / n el principio...    -> En el principio...
+        deuteronomio / ́ / E / 1 stas son las palabras...            -> 1 Éstas son...
+        joel / P / 1, 2 alabra de Jehová...                           -> 1, 2 Palabra...
+        Rut / A / conteció en los días...                             -> Aconteció en...
+        lamentaciones de / jeremias / ¡Cómo ha quedado sola...        (no drop cap)
+
+    A margin verse number between the drop cap and the word is moved in front of the
+    rebuilt word, where :func:`_split_markers` picks it up.
+    """
+    for j in range(min(len(lines) - 1, 8)):  # the drop cap: everything before it is title
+        if not re.fullmatch(r"[A-ZÁÉÍÓÚÑ]", lines[j]):
+            continue
+        m = re.match(rf"({_MARKERS}\s+)?([a-záéíóúüñ].*)$", lines[j + 1])
+        if m:
+            cap = lines[j]
+            if j > 0 and lines[j - 1] in ("´", "\u0301", "'"):  # "´" + "E" -> "É"
                 cap = unicodedata.normalize("NFC", cap + "\u0301")
-            return [cap + lines[i + 1], *lines[i + 2 :]]
-    return lines
+            return [f"{m.group(1) or ''}{cap}{m.group(2)}", *lines[j + 2 :]]
+    i = 0  # no drop cap (Lamentaciones): drop the small-caps title lines
+    while i < len(lines) and re.fullmatch(r"[a-záéíóúüñ ]+", lines[i]):
+        i += 1
+    return lines[i:]
 
 
 def parse_rvr(pages: list[str], expected_books: int | None = 66) -> Iterator[Unit]:

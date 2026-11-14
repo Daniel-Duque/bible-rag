@@ -134,11 +134,52 @@ def test_cli_end_to_end_with_real_model_code(tiny_models, tmp_path, monkeypatch,
     monkeypatch.setattr("bible_rag.ingest.load_version", lambda v, *a, **kw: PASSAGES[v])
 
     assert cli.main(["ingest"]) == 0
-    assert "kjv: 3 passages" in capsys.readouterr().out
+    assert "kjv: 3 passages, embedder hf:" in capsys.readouterr().out
 
     assert cli.main(["ask", "-k", "1", "god love world"]) == 0
     out = capsys.readouterr().out
     assert "Sources:" in out and "(KJV)" in out and "(RVR1960)" in out
+    assert f"Answered by: hf:{tiny_models['llm']}" in out
 
     assert cli.main(["search", "--json", "--versions", "rvr1960", "pastor"]) == 0
     assert '"version": "RVR1960"' in capsys.readouterr().out
+
+
+@pytest.fixture(scope="session")
+def smollm2_settings(tmp_path_factory):
+    from bible_rag.config import Settings
+
+    return Settings(model_cache_dir=tmp_path_factory.mktemp("models"), max_new_tokens=24)
+
+
+def test_bundled_smollm2_converts_loads_and_answers(smollm2_settings):
+    """The real offline fallback LLM: GGUF from the wheel -> transformers -> generated text.
+
+    Only the plumbing is asserted. Answer *quality* is measured by `bible-rag eval` (a 135M
+    model gets simple questions wrong, which is why every answer is grounding-checked).
+    """
+    import time
+
+    from bible_rag.llm import create_chat_model
+
+    model = create_chat_model("smollm2", smollm2_settings, "cpu")
+    assert model.label == "smollm2" and model.languages == {"en"} and model.compact
+    messages = [
+        {"role": "system", "content": "Answer using only the passage. Keep it short."},
+        {
+            "role": "user",
+            "content": "Passage: Genesis 6:14 (KJV): Make thee an ark of gopher "
+            "wood.\n\nQuestion: What was the ark made of?",
+        },
+    ]
+    reply = model.generate(messages)
+    assert isinstance(reply, str) and len(reply.split()) >= 3
+    assert "<|im_start|>" not in reply and "<|im_end|>" not in reply
+    assert "".join(model.stream(messages)).strip() == reply  # greedy: stream == generate
+    # converted once; the second load reuses the cache
+    assert (
+        smollm2_settings.model_cache_dir / "SmolLM2-135M-Instruct" / "model.safetensors"
+    ).exists()
+    t0 = time.perf_counter()
+    create_chat_model("smollm2", smollm2_settings, "cpu")
+    assert time.perf_counter() - t0 < 20

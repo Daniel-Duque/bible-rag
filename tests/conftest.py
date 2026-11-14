@@ -11,16 +11,18 @@ import pytest
 
 from bible_rag.config import Settings
 from bible_rag.corpus import Passage
-from bible_rag.index import VersionIndex
+from bible_rag.index import VersionIndex, embedder_key
+from bible_rag.llm import ModelChain
 from bible_rag.rag import BibleRAG
 
 DIM = 64
+FAKE_EMBEDDER = "fake/hashing-embedder"
 
 
 class FakeEmbedder:
     """Deterministic bag-of-words hashing embedder (lexical overlap => similarity)."""
 
-    model_name = "fake/hashing-embedder"
+    model_name = FAKE_EMBEDDER
 
     def embed(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
         out = np.zeros((len(texts), DIM), dtype="float32")
@@ -32,14 +34,24 @@ class FakeEmbedder:
 
 
 class FakeLLM:
-    model_name = "fake/echo-llm"
+    """Answers 'According to <first passage>, ...' citing the first context passage."""
 
-    def __init__(self):
+    model_name = "fake/echo-llm"
+    label = "fake"
+    languages = None
+    compact = False
+
+    def __init__(self, fail: bool = False):
         self.calls: list[list[dict]] = []
+        self.fail = fail
 
     def _reply(self, messages: list[dict]) -> str:
+        if self.fail:
+            raise ConnectionError("model server went away")
         self.calls.append(messages)
-        first = re.search(r"\[1\] (.+)", messages[-1]["content"]).group(1)
+        content = messages[-1]["content"]
+        first = re.search(r"\[1\] (.+)|Passages:\n(.+?\)):", content)
+        first = first.group(1) or first.group(2)
         return f"According to {first}, God loves the world."
 
     def generate(self, messages: list[dict]) -> str:
@@ -132,7 +144,9 @@ def settings(tmp_path) -> Settings:
         index_dir=tmp_path / "index",
         data_dir=tmp_path / "data",
         top_k=2,
-        embedding_model=FakeEmbedder.model_name,
+        model_cache_dir=tmp_path / "models",
+        embedding_chain=(FAKE_EMBEDDER,),
+        connect_timeout=0.5,
     )
 
 
@@ -146,11 +160,29 @@ def indexes(settings, embedder) -> dict[str, VersionIndex]:
     built = {}
     for version, passages in PASSAGES.items():
         idx = VersionIndex.build(version, passages, embedder, {"chunk_size": 450})
-        idx.save(settings.index_dir / version)
+        idx.save(settings.index_dir / embedder_key(FAKE_EMBEDDER) / version)
         built[version] = idx
     return built
 
 
 @pytest.fixture
-def rag(settings, embedder, indexes) -> BibleRAG:
-    return BibleRAG(settings, embedder, indexes, FakeLLM())
+def fake_llm() -> FakeLLM:
+    return FakeLLM()
+
+
+def make_chain(*models) -> ModelChain:
+    """Chain over prepared objects; an Exception instance means 'fails to load'."""
+    table = {f"m{i}": m for i, m in enumerate(models)}
+
+    def factory(spec):
+        model = table[spec]
+        if isinstance(model, Exception):
+            raise model
+        return model
+
+    return ModelChain(list(table), factory)
+
+
+@pytest.fixture
+def rag(settings, embedder, indexes, fake_llm) -> BibleRAG:
+    return BibleRAG(settings, embedder, indexes, make_chain(fake_llm), FAKE_EMBEDDER)

@@ -30,12 +30,30 @@ class Settings:
     chunk_size: int = 450
     chunk_overlap: int = 80
 
-    # Models (same as RAG0.ipynb)
+    # Preferred models (same as RAG0.ipynb)
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     llm_model: str = "Qwen/Qwen2.5-1.5B-Instruct"
     device: str = "auto"  # auto | cpu | cuda | mps
 
+    # Fallback chains, tried in order (see README "Model fallback"). Empty = defaults:
+    #   embeddings: hf:<embedding_model>, usem3
+    #   LLM:        hf:<llm_model>, ollama, openai, smollm2, extractive
+    embedding_chain: tuple[str, ...] = ()
+    llm_chain: tuple[str, ...] = ()
+
+    # Local OpenAI-compatible servers (free, self-hosted)
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = ""  # empty = first model reported by `ollama list`
+    openai_base_url: str = ""  # e.g. LM Studio http://127.0.0.1:1234/v1, llama.cpp server
+    openai_model: str = ""
+    openai_api_key: str = ""
+    connect_timeout: float = 3.0
+
+    # Where converted models are cached (the bundled GGUF fallback is converted once)
+    model_cache_dir: Path = PROJECT_ROOT / "storage" / "models"
+
     # Retrieval / generation
+    retrieval: str = "hybrid"  # hybrid (embeddings + BM25 keywords) | dense
     top_k: int = 3  # passages retrieved *per version*
     max_new_tokens: int = 512
     temperature: float = 0.2  # 0 = greedy decoding
@@ -66,7 +84,22 @@ class Settings:
         settings = cls(**values)
         settings.data_dir = _resolve(settings.data_dir)
         settings.index_dir = _resolve(settings.index_dir)
+        settings.model_cache_dir = _resolve(settings.model_cache_dir)
         return settings
+
+    @property
+    def embedding_specs(self) -> list[str]:
+        return list(self.embedding_chain) or [f"hf:{self.embedding_model}", "usem3"]
+
+    @property
+    def llm_specs(self) -> list[str]:
+        return list(self.llm_chain) or [
+            f"hf:{self.llm_model}",
+            "ollama",
+            "openai",
+            "smollm2",
+            "extractive",
+        ]
 
     def resolve_device(self) -> str:
         if self.device != "auto":

@@ -11,6 +11,18 @@ from bible_rag.config import Settings
 from bible_rag.corpus import VERSIONS, extract_pages, load_version, parse_kjv, parse_rvr
 
 DATA = Settings().data_dir
+TITLE_PHRASES = (
+    "libro primero",
+    "libro segundo",
+    "libro tercero",
+    "libro cuarto",
+    "libro quinto",
+    "primer libro",
+    "segundo libro",
+    "santo evangelio",
+    "epístola del apóstol",
+    "epístola universal",
+)
 pytestmark = [
     pytest.mark.pdf,
     pytest.mark.skipif(not (DATA / VERSIONS["kjv"].filename).exists(), reason="PDFs not found"),
@@ -67,6 +79,10 @@ def test_passages_are_clean_and_sized():
             assert len(p.text) <= 600, p.citation  # a single very long verse may exceed 450
             assert not any(ch in p.text for ch in "\ufffe\u00ad\u0133\ufb01"), p.citation
             assert "Jeho-vá" not in p.text, p.citation
+            # book titles of opening pages (chapter 1) must not leak into the text
+            if p.chapter == 1 and p.verse_start == 1:
+                head = p.text[:80].lower()
+                assert not any(t in head for t in TITLE_PHRASES), p.citation
         john = next(
             p
             for p in passages
