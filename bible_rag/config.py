@@ -11,11 +11,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass
 class Settings:
-    data_dir: Path = ROOT / "src" / "data"  # the two PDFs
+    versions: tuple[str, ...] = ("kjv", "rv1909")  # see sources.VERSIONS / `bible-rag versions`
+    allow_restricted: bool = False  # permit versions whose license forbids public use
+    data_dir: Path = ROOT / "src" / "data"  # PDFs (restricted RVR1960 option)
+    sword_dir: Path = ROOT / "storage" / "sword"  # downloaded public-domain SWORD modules
     index_dir: Path = ROOT / "storage" / "index"  # <embedder>/<version>/
     model_cache_dir: Path = ROOT / "storage" / "models"  # converted GGUF fallback
-    versions: tuple[str, ...] = ("kjv", "rvr1960")
-    include_apocrypha: bool = False  # only the KJV PDF has it
 
     # 450 chars ~ the 128-token limit of the MiniLM embedder
     chunk_size: int = 450
@@ -55,7 +56,7 @@ class Settings:
                 values[f.name] = _coerce(raw, f.default)
         values.update({k: v for k, v in overrides.items() if v is not None})
         s = cls(**values)
-        for name in ("data_dir", "index_dir", "model_cache_dir"):
+        for name in ("data_dir", "sword_dir", "index_dir", "model_cache_dir"):
             path = Path(getattr(s, name)).expanduser()
             setattr(s, name, path if path.is_absolute() else ROOT / path)
         return s

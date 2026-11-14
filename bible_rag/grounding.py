@@ -19,8 +19,8 @@ def _words(text: str) -> str:
     return " ".join(re.findall(r"\w+", _fold(text)))
 
 
-_NAMES = {_fold(name): i for i, pair in enumerate(BOOKS) for name in pair}
-_NAMES |= {"psalms": 18, "salmo": 18, "song of songs": 21, "cantares": 21, "revelations": 65}
+_NAMES = {_fold(name): i for i, (_, en, es) in enumerate(BOOKS) for name in (en, es)}
+_NAMES |= {"psalm": 18, "salmo": 18, "song of songs": 21, "cantares": 21, "revelations": 65}
 _REF = re.compile(
     r"(?P<book>(?:[123]\s?)?[a-z][a-z]+\.?(?:\s(?:of|de|los)\s[a-z]+|\s[a-z]+)?)"
     r"\s+(?P<ch>\d{1,3}):(?P<v1>\d{1,3})(?:\s*[-–]\s*(?P<v2>\d{1,3}))?"

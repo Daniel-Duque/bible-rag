@@ -7,19 +7,17 @@ import pytest
 from bible_rag.config import Settings
 from bible_rag.corpus import (
     BOOKS,
-    VERSIONS,
     Passage,
     Unit,
     _strip_opening,
     chunk_units,
     extract_pages,
     join_units_text,
-    load_version,
     normalize,
-    parse_kjv,
     parse_rvr,
     resolve_line_hyphens,
 )
+from bible_rag.sources import load_units
 
 # ----------------------------------------------------------------------------- helpers
 
@@ -79,67 +77,6 @@ def test_join_units_text_rejoins_hyphenated_words():
 
 
 # ----------------------------------------------------------------------------- KJV
-
-
-def test_kjv_skips_front_matter_and_parses_verses():
-    pages = [
-        kjv_page("Contents\nGenesis 1 26", "xii"),  # table of contents
-        kjv_page("THE TRANSLATORS TO THE READER\nblah", "The Translators to the Reader"),
-        kjv_page("Old Testament", "Old Testament"),
-        kjv_page("The First Book of Moses, called\nGenesis", "Genesis"),
-        kjv_page(
-            "Chapter 1\nIn the beginning God created the heaven and the earth.\n"
-            "2And the earth was without form, and void; and darkness was upon\n"
-            "the face of the deep.\n3\nAnd God said, Let there be light: and there was "
-            "light.",
-            "Genesis 1",
-        ),
-        kjv_page(
-            "4And God saw the light, that it was good: and God divided the li\ufffeght.",
-            "Genesis 1",
-        ),
-        kjv_page("Chapter 2\nThus the heavens and the earth were finished.", "Genesis 2"),
-        kjv_page("Indexes", "Indexes"),
-        kjv_page("Index of Scripture References\nGalatians 4:16", "Index of Scripture References"),
-    ]
-    units = list(parse_kjv(pages))
-    assert refs(units) == [
-        ("Genesis", 1, 1, 1),
-        ("Genesis", 1, 2, 2),
-        ("Genesis", 1, 3, 3),
-        ("Genesis", 1, 4, 4),
-        ("Genesis", 2, 1, 1),
-    ]
-    assert units[1].text == (
-        "And the earth was without form, and void; and darkness was upon the face of the deep."
-    )
-    assert units[2].text.startswith("And God said")  # verse number on its own line
-    assert units[3].text.endswith("divided the light.")  # pdfium soft hyphen removed
-    assert {u.section for u in units} == {"OT"}
-
-
-def test_kjv_resets_between_single_chapter_books_and_labels_apocrypha():
-    pages = [
-        kjv_page("Old Testament", "Old Testament"),
-        kjv_page("Obadiah", "Obadiah"),
-        kjv_page(
-            "Chapter 1\nThe vision of Obadiah.\n2Behold, I have made thee small.", "Obadiah 1"
-        ),
-        kjv_page("Jonah", "Jonah"),
-        kjv_page("Chapter 1\nNow the word of the Lord came unto Jonah.", "Jonah 1"),
-        kjv_page("Apocrypha", "Apocryphal or Deuterocanonical Books"),
-        kjv_page("Susanna", "Susanna"),
-        kjv_page("Chapter 1\nThere dwelt a man in Babylon.\n2And he took a wife.", "Chapter 1"),
-    ]
-    units = list(parse_kjv(pages))
-    assert refs(units) == [
-        ("Obadiah", 1, 1, 1),
-        ("Obadiah", 1, 2, 2),
-        ("Jonah", 1, 1, 1),
-        ("Susanna", 1, 1, 1),
-        ("Susanna", 1, 2, 2),
-    ]
-    assert units[-1].section == "Apocrypha"
 
 
 # ----------------------------------------------------------------------------- RVR1960
@@ -211,7 +148,7 @@ def test_rvr_soft_hyphen_with_hidden_margin_number():
 def test_chunks_respect_size_overlap_and_chapters():
     units = [Unit("John", 3, v, v, f"verse {v} " + "x" * 40, 10, "NT") for v in range(1, 11)]
     units += [Unit("John", 4, 1, 1, "new chapter", 12, "NT")]
-    chunks = list(chunk_units(units, VERSIONS["kjv"], 150, 60))
+    chunks = list(chunk_units(units, "KJV", "en", 150, 60))
     assert all(len(c.text) <= 150 for c in chunks)
     assert all(c.chapter == 3 for c in chunks[:-1]) and chunks[-1].reference == "John 4:1"
     # consecutive chunks overlap by one verse
@@ -252,8 +189,9 @@ def test_strip_opening_layouts():
     ]
 
 
-# ------------------------------------------------------------------ real PDFs (~40 s)
+# ------------------------------------------- real RVR1960 PDF vs the Debian KJV (~60 s)
 DATA = Settings().data_dir
+RVR = DATA / "biblia-reina-valera-1960.pdf"
 TITLES = (
     "libro primero",
     "libro segundo",
@@ -266,52 +204,31 @@ TITLES = (
     "epístola del apóstol",
     "epístola universal",
 )
-pdf = pytest.mark.skipif(not (DATA / "kjv.pdf").exists(), reason="PDFs not found")
 
 
 def structure(units):
-    """[books], {(book, chapter): last verse} without the Apocrypha."""
+    """{(book index, chapter): last verse}."""
+    index = {name: i for i, (_, en, es) in enumerate(BOOKS) for name in (en, es)}
     chapters = defaultdict(int)
     for u in units:
-        if u.section != "Apocrypha":
-            chapters[u.book, u.chapter] = max(chapters[u.book, u.chapter], u.verse_end)
-    return list(dict.fromkeys(b for b, _ in chapters)), chapters
-
-
-@pytest.fixture(scope="module")
-def real():
-    return {
-        "kjv": structure(parse_kjv(extract_pages(DATA / "kjv.pdf"))),
-        "rvr": structure(parse_rvr(extract_pages(DATA / VERSIONS["rvr1960"].filename))),
-    }
+        key = index[u.book], u.chapter
+        chapters[key] = max(chapters[key], u.verse_end)
+    return chapters
 
 
 @pytest.mark.pdf
-@pdf
-def test_real_pdfs_match_the_canon(real):
-    books, chapters = real["kjv"]
-    assert len(books) == 66 and len(chapters) == 1189 and sum(chapters.values()) == 31102
-    assert chapters["Psalm", 119] == 176 and chapters["John", 3] == 36
-    rvr_books, rvr_chapters = real["rvr"]
-    assert [b for b, _ in BOOKS] == books and [b for _, b in BOOKS] == rvr_books
-    to_kjv = dict(zip(rvr_books, books, strict=True))
-    diffs = {
-        k: (v, chapters[to_kjv[k[0]], k[1]])
-        for k, v in rvr_chapters.items()
-        if chapters[to_kjv[k[0]], k[1]] != v
-    }
+@pytest.mark.sword
+@pytest.mark.skipif(not RVR.exists(), reason="RVR1960 PDF not found")
+def test_rvr1960_pdf_matches_the_kjv_versification():
+    units = resolve_line_hyphens(list(parse_rvr(extract_pages(RVR))))
+    assert [b for b in dict.fromkeys(u.book for u in units)] == [es for _, _, es in BOOKS]
+    rvr, kjv = structure(units), structure(load_units("kjv", Settings.from_env()))
+    assert len(rvr) == len(kjv) == 1189 and sum(kjv.values()) == 31102
+    diffs = {(BOOKS[b][2], c): (v, kjv[b, c]) for (b, c), v in rvr.items() if kjv[b, c] != v}
     # genuine: 3 John has 15 verses in RVR1960; this PDF prints a stray "10" in Psalm 47
     assert diffs == {("3 Juan", 1): (15, 14), ("Salmos", 47): (10, 9)}
-
-
-@pytest.mark.pdf
-@pdf
-def test_real_passages_are_clean():
-    for version in VERSIONS:
-        passages = load_version(version, DATA, 450, 80)
-        assert len(passages) > 9000
-        for p in passages:
-            assert len(p.text) <= 600 and "Jeho-vá" not in p.text, p.citation
-            assert not any(c in p.text for c in "\ufffe\u00ad\u0133\ufb01"), p.citation
-            if p.chapter == 1 and p.verse_start == 1:  # no book title leaked into the text
-                assert not any(t in p.text[:80].lower() for t in TITLES), p.citation
+    for p in chunk_units(units, "RVR1960", "es", 450, 80):
+        assert len(p.text) <= 600 and "Jeho-vá" not in p.text, p.citation
+        assert not any(c in p.text for c in "\ufffe\u00ad\u0133\ufb01"), p.citation
+        if p.chapter == 1 and p.verse_start == 1:  # no book title leaked into the text
+            assert not any(t in p.text[:80].lower() for t in TITLES), p.citation

@@ -20,14 +20,33 @@ from pathlib import Path
 import numpy as np
 
 from .config import Settings
-from .corpus import Passage, load_version
+from .corpus import Passage, chunk_units
 from .models import describe_error, embedder_key, load_embedder
+from .sources import VERSIONS, check_licenses, load_units
 
 log = logging.getLogger(__name__)
 
 
+def _faiss():
+    import faiss
+
+    # single-threaded search takes ~20 ms on these indexes, and FAISS's OpenMP pool otherwise
+    # competes with PyTorch's: LLM generation in the same process was up to ~2x slower
+    faiss.omp_set_num_threads(1)
+    return faiss
+
+
 class IndexNotFoundError(RuntimeError):
     pass
+
+
+def index_is_current(directory: Path, version: str) -> bool:
+    """An index exists and was built from the version's current source."""
+    manifest = directory / "manifest.json"
+    return (
+        manifest.exists()
+        and json.loads(manifest.read_text()).get("source") == VERSIONS[version].source
+    )
 
 
 @dataclass
@@ -50,7 +69,8 @@ _STOP = frozenset((
 
 
 def tokens(text: str) -> list[str]:
-    """Lowercase, accent-free keywords."""
+    """Lowercase, accent-free keywords (æ -> ae: the KJV writes Cæsar, Judæa)."""
+    text = text.replace("æ", "ae").replace("Æ", "Ae").replace("œ", "oe")
     folded = "".join(
         c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn"
     )
@@ -94,7 +114,7 @@ class VersionIndex:
 
     @classmethod
     def build(cls, passages: list[Passage], embedder, manifest: dict) -> VersionIndex:
-        import faiss
+        faiss = _faiss()
 
         vectors = embedder.embed([p.embedding_text() for p in passages], show_progress=True)
         index = faiss.IndexFlatIP(vectors.shape[1])  # inner product of unit vectors = cosine
@@ -106,7 +126,7 @@ class VersionIndex:
         )
 
     def save(self, directory: Path) -> None:
-        import faiss
+        faiss = _faiss()
 
         directory.mkdir(parents=True, exist_ok=True)
         faiss.write_index(self.index, str(directory / "index.faiss"))
@@ -116,7 +136,7 @@ class VersionIndex:
 
     @classmethod
     def load(cls, directory: Path, expected_model: str | None = None) -> VersionIndex:
-        import faiss
+        faiss = _faiss()
 
         if not (directory / "manifest.json").exists():
             raise IndexNotFoundError(f"No index at {directory}. Build it with: bible-rag ingest")
@@ -164,6 +184,7 @@ def build_indexes(
     settings: Settings, force: bool = False, spec: str | None = None, embedder=None
 ) -> dict[str, VersionIndex]:
     """Index every version with the first embedder of the chain that loads (or `spec`)."""
+    check_licenses(settings.versions, settings.allow_restricted)
     if embedder is None:
         errors = []
         for candidate in [spec] if spec else settings.embedding_specs:
@@ -180,17 +201,17 @@ def build_indexes(
     spec = spec or embedder.model_name
     root, built = settings.index_dir / embedder_key(spec), {}
     for version in settings.versions:
-        if (root / version / "manifest.json").exists() and not force:
+        if index_is_current(root / version, version) and not force:
             continue
         log.info("%s: parsing and embedding with %s...", version, spec)
-        passages = load_version(
-            version,
-            settings.data_dir,
-            settings.chunk_size,
-            settings.chunk_overlap,
-            settings.include_apocrypha,
+        v = VERSIONS[version]
+        units = load_units(version, settings)
+        passages = list(
+            chunk_units(units, v.label, v.language, settings.chunk_size, settings.chunk_overlap)
         )
-        index = VersionIndex.build(passages, embedder, {"embedder": spec})
+        index = VersionIndex.build(
+            passages, embedder, {"embedder": spec, "source": v.source, "license": v.license}
+        )
         tmp = root / f".{version}.tmp"  # write aside, then swap: never a half-written index
         shutil.rmtree(tmp, ignore_errors=True)
         index.save(tmp)
@@ -203,11 +224,12 @@ def build_indexes(
 def open_indexes(settings: Settings):
     """(embedder, {version: index}, spec, skipped) for the first embedder that has an index
     for every version and loads."""
+    check_licenses(settings.versions, settings.allow_restricted)
     skipped = []
     for spec in settings.embedding_specs:
         dirs = {v: settings.index_dir / embedder_key(spec) / v for v in settings.versions}
-        if not all((d / "manifest.json").exists() for d in dirs.values()):
-            skipped.append((spec, "no index (run: bible-rag ingest)"))
+        if not all(index_is_current(d, v) for v, d in dirs.items()):
+            skipped.append((spec, "no current index (run: bible-rag ingest)"))
             continue
         try:
             embedder = load_embedder(spec, settings.resolve_device(), settings.connect_timeout)

@@ -3,9 +3,9 @@
 import streamlit as st
 
 from bible_rag.config import Settings
-from bible_rag.corpus import VERSIONS
 from bible_rag.index import IndexNotFoundError, build_indexes
 from bible_rag.rag import BibleRAG
+from bible_rag.sources import VERSIONS
 
 st.set_page_config(page_title="Bible RAG · KJV / RVR1960", page_icon="📖")
 
@@ -38,7 +38,7 @@ def show_details(item: dict) -> None:
 with st.spinner("Loading models… (a first start also builds the search index, a few minutes)"):
     rag = get_rag()
 
-labels = {v.label: key for key, v in VERSIONS.items()}
+labels = {VERSIONS[key].label: key for key in rag.indexes}
 with st.sidebar:
     chosen = st.multiselect("Translations", list(labels), default=list(labels))
     k = st.slider("Passages per translation", 1, 5, rag.settings.top_k)
@@ -47,6 +47,12 @@ with st.sidebar:
         st.caption(note)
     if st.button("Clear chat"):
         st.session_state.history = []
+    st.divider()
+    for key in rag.indexes:  # texts and their licenses
+        v = VERSIONS[key]
+        st.caption(f"**{v.label}**: {v.name}. {v.license}. {v.conditions}")
+        if not v.public:
+            st.warning(f"{v.label} may not be served publicly.")
 
 st.title("📖 Bible RAG")
 st.caption(

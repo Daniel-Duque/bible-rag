@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from bible_rag import evaluation
+from bible_rag.corpus import Unit
 from bible_rag.grounding import book_index, check_answer
 from bible_rag.index import (
     BM25,
@@ -47,7 +48,7 @@ def test_bm25_and_hybrid_search_find_names_embeddings_miss():
             return v / np.linalg.norm(v, axis=1, keepdims=True)
 
     emb = ArbitraryEmbedder()
-    filler = [passage("kjv", "Psalm", n, 1, 1, f"praise the lord, song {n}") for n in range(1, 40)]
+    filler = [passage("kjv", "Psalms", n, 1, 1, f"praise the lord, song {n}") for n in range(1, 40)]
     target = passage("kjv", "1 Samuel", 17, 49, 50, "the stone sank into Goliath forehead")
     idx = VersionIndex.build([*filler, target], emb, {})
     assert BM25([p.text for p in idx.passages]).search("Goliath", 3) == [39]
@@ -60,9 +61,9 @@ def test_bm25_and_hybrid_search_find_names_embeddings_miss():
 
 def test_search_per_version_and_validation(rag):
     hits = rag.search("the Lord is my shepherd", k=1)
-    assert [h.passage.version for h in hits] in (["KJV", "RVR1960"], ["RVR1960", "KJV"])
-    assert hits[0].passage.citation == "Psalm 23:1-2 (KJV)"
-    assert {h.passage.version for h in rag.search("Dios", versions=["rvr1960"])} == {"RVR1960"}
+    assert [h.passage.version for h in hits] in (["KJV", "RV1909"], ["RV1909", "KJV"])
+    assert hits[0].passage.citation == "Psalms 23:1-2 (KJV)"
+    assert {h.passage.version for h in rag.search("Dios", versions=["rv1909"])} == {"RV1909"}
     with pytest.raises(ValueError, match="Unknown"):
         rag.search("x", versions=["niv"])
     with pytest.raises(ValueError, match="empty"):
@@ -76,14 +77,22 @@ def test_build_indexes_falls_back_and_open_indexes_follows(settings, monkeypatch
         return FakeEmbedder()
 
     monkeypatch.setattr("bible_rag.index.load_embedder", load)
-    monkeypatch.setattr("bible_rag.index.load_version", lambda v, *a: PASSAGES[v])
+    units = {
+        v: [Unit(p.book, p.chapter, p.verse_start, p.verse_end, p.text, 0, "NT") for p in ps]
+        for v, ps in PASSAGES.items()
+    }
+    monkeypatch.setattr("bible_rag.index.load_units", lambda v, s: units[v])
     settings.embedding_chain = ("hf:some/model", "usem3")
     built = build_indexes(settings)
     assert built["kjv"].manifest["embedder"] == "usem3"
     assert build_indexes(settings) == {}  # already built
     embedder, indexes, spec, skipped = open_indexes(settings)
-    assert spec == "usem3" and set(indexes) == {"kjv", "rvr1960"}
-    assert skipped == [("hf:some/model", "no index (run: bible-rag ingest)")]
+    assert spec == "usem3" and set(indexes) == {"kjv", "rv1909"}
+    assert skipped == [("hf:some/model", "no current index (run: bible-rag ingest)")]
+    # an index built from another source (e.g. the old KJV PDF) is stale: rebuilt
+    manifest = settings.index_dir / "usem3" / "kjv" / "manifest.json"
+    manifest.write_text(manifest.read_text().replace("sword:engKJV2006eb", "pdf:kjv.pdf"))
+    assert set(build_indexes(settings)) == {"kjv"}
     settings.embedding_chain = ("hf:some/model",)
     with pytest.raises(IndexNotFoundError, match="bible-rag ingest"):
         open_indexes(settings)
@@ -109,7 +118,7 @@ def test_prompt_and_grounded_answer(rag, fake_llm):
     answer = rag.ask("¿Cómo amó Dios al mundo?", k=1)
     system, user = fake_llm.calls[-1]
     assert system["content"] == SYSTEM_PROMPT and "Answer in Spanish" in user["content"]
-    assert "(KJV)" in user["content"] and "(RVR1960)" in user["content"]
+    assert "(KJV)" in user["content"] and "(RV1909)" in user["content"]
     assert answer.grounding.grounded and answer.notes == []
 
 
@@ -117,7 +126,7 @@ def test_extractive_and_english_only_models(rag):
     rag.chain = make_chain(None)  # extractive
     es = rag.ask("¿Jehová es mi pastor?", k=1)
     assert es.text.startswith("Pasajes que mejor responden")
-    assert "Salmos 23:1-2 (RVR1960): “Jehová es mi pastor" in es.text and es.grounding.grounded
+    assert "Salmos 23:1-2 (RV1909): “Jehová es mi pastor" in es.text and es.grounding.grounded
     small = FakeLLM()
     small.languages, small.label, small.compact = {"en"}, "smollm2", True
     rag.chain = make_chain(small)
@@ -129,7 +138,7 @@ def test_extractive_and_english_only_models(rag):
     )
     rag.ask("Who is my shepherd?", k=2)
     system, user = small.calls[-1]
-    assert system["content"] == COMPACT_PROMPT and "(RVR1960)" not in user["content"]
+    assert system["content"] == COMPACT_PROMPT and "(RV1909)" not in user["content"]
 
 
 @pytest.mark.parametrize(
@@ -187,7 +196,7 @@ def test_evaluate(rag, monkeypatch):
         evaluation,
         "GOLD",
         [
-            ("The Lord is my shepherd", "Jehová es mi pastor", [("Psalm", 23)]),
+            ("The Lord is my shepherd", "Jehová es mi pastor", [("Psalms", 23)]),
             ("In the beginning God created", "En el principio creó Dios", [("Exodus", 20)]),
         ],
     )

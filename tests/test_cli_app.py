@@ -38,7 +38,7 @@ def test_unverified_answer_shows_warning_and_evidence(run, fake_llm):
 
 def test_search_stdin_versions_and_chat(run, monkeypatch):
     code, out = run("search", "--versions", "kjv", "good", "shepherd")
-    assert "Psalm 23:1-2 (KJV)" in out and "RVR1960" not in out
+    assert "Psalms 23:1-2 (KJV)" in out and "RV1909" not in out
     monkeypatch.setattr("sys.stdin", io.StringIO("In the beginning\n"))
     assert "Genesis 1:1-2" in run("search")[1]
     inputs = iter(["/k 1", "Who is my shepherd?", "/search pastor", "/nope", "/quit"])
@@ -92,3 +92,13 @@ def test_app_builds_missing_index_on_first_start(rag, monkeypatch):
     monkeypatch.setattr("bible_rag.index.build_indexes", lambda s: calls.append("built"))
     at = AppTest.from_file(APP, default_timeout=30).run()
     assert not at.exception and calls == ["missing", "built"]
+
+
+def test_versions_report_and_license_refusal(monkeypatch, capsys, tmp_path):
+    assert cli.main(["versions"]) == 0
+    out = capsys.readouterr().out
+    assert "✓ rv1909" in out and "✗ rvr1960" in out and "NOT for public use" in out
+    monkeypatch.setenv("BIBLE_RAG_VERSIONS", "kjv,rvr1960")
+    monkeypatch.setenv("BIBLE_RAG_INDEX_DIR", str(tmp_path))
+    assert cli.main(["ingest"]) == 1
+    assert "BIBLE_RAG_ALLOW_RESTRICTED" in capsys.readouterr().err

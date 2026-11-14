@@ -11,6 +11,7 @@ from bible_rag.corpus import Passage
 from bible_rag.index import VersionIndex
 from bible_rag.models import ModelChain, embedder_key
 from bible_rag.rag import BibleRAG
+from bible_rag.sources import VERSIONS
 
 FAKE_EMBEDDER = "fake"
 
@@ -49,72 +50,30 @@ class FakeLLM:
 
 
 def passage(version, book, chapter, v1, v2, text):
-    en = version == "kjv"
-    return Passage(
-        "KJV" if en else "RVR1960", "en" if en else "es", book, chapter, v1, v2, text, 1, "NT"
-    )
+    v = VERSIONS[version]
+    return Passage(v.label, v.language, book, chapter, v1, v2, text)
 
 
+# fmt: off
 PASSAGES = {
     "kjv": [
-        passage(
-            "kjv",
-            "John",
-            3,
-            16,
-            17,
-            "For God so loved the world, that he gave his only "
-            "begotten Son, that whosoever believeth in him should not perish.",
-        ),
-        passage(
-            "kjv",
-            "Genesis",
-            1,
-            1,
-            2,
-            "In the beginning God created the heaven and the "
-            "earth. And the earth was without form, and void.",
-        ),
-        passage(
-            "kjv",
-            "Psalm",
-            23,
-            1,
-            2,
-            "The Lord is my shepherd; I shall not want. He maketh "
-            "me to lie down in green pastures.",
-        ),
+        passage("kjv", "John", 3, 16, 17, "For God so loved the world, that he gave his only "
+                "begotten Son, that whosoever believeth in him should not perish."),
+        passage("kjv", "Genesis", 1, 1, 2, "In the beginning God created the heaven and the "
+                "earth. And the earth was without form, and void."),
+        passage("kjv", "Psalms", 23, 1, 2, "The Lord is my shepherd; I shall not want. He maketh "
+                "me to lie down in green pastures."),
     ],
-    "rvr1960": [
-        passage(
-            "rvr1960",
-            "Juan",
-            3,
-            16,
-            17,
-            "Porque de tal manera amó Dios al mundo, que ha "
-            "dado a su Hijo unigénito, para que todo aquel que en él cree, no se pierda.",
-        ),
-        passage(
-            "rvr1960",
-            "Génesis",
-            1,
-            1,
-            2,
-            "En el principio creó Dios los cielos y la tierra. "
-            "Y la tierra estaba desordenada y vacía.",
-        ),
-        passage(
-            "rvr1960",
-            "Salmos",
-            23,
-            1,
-            2,
-            "Jehová es mi pastor; nada me faltará. En lugares "
-            "de delicados pastos me hará descansar.",
-        ),
+    "rv1909": [
+        passage("rv1909", "Juan", 3, 16, 17, "Porque de tal manera amó Dios al mundo, que ha dado "
+                "á su Hijo unigénito, para que todo aquel que en él cree, no se pierda."),
+        passage("rv1909", "Génesis", 1, 1, 2, "En el principio crió Dios los cielos y la tierra. "
+                "Y la tierra estaba desordenada y vacía."),
+        passage("rv1909", "Salmos", 23, 1, 2, "Jehová es mi pastor; nada me faltará. En lugares "
+                "de delicados pastos me hará yacer."),
     ],
 }
+# fmt: on
 
 
 def make_chain(*models):
@@ -144,7 +103,8 @@ def settings(tmp_path):
 def indexes(settings):
     built = {}
     for version, passages in PASSAGES.items():
-        built[version] = VersionIndex.build(passages, FakeEmbedder(), {"embedder": FAKE_EMBEDDER})
+        manifest = {"embedder": FAKE_EMBEDDER, "source": VERSIONS[version].source}
+        built[version] = VersionIndex.build(passages, FakeEmbedder(), manifest)
         built[version].save(settings.index_dir / embedder_key(FAKE_EMBEDDER) / version)
     return built
 

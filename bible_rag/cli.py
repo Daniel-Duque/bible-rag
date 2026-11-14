@@ -1,7 +1,8 @@
 """`bible-rag` command line.
 
+versions          Bible texts, their licenses and sources
 models [--test]   which embedders / LLMs are usable here (and which will be used)
-ingest [--force]  parse the PDFs and build the indexes (once)
+ingest [--force]  download the texts and build the indexes (once)
 search "text"     retrieval only
 ask "question"    one answer with checked citations
 chat              interactive session (models load once)
@@ -18,7 +19,7 @@ import sys
 import time
 
 from .config import Settings
-from .corpus import VERSIONS
+from .sources import VERSIONS
 
 
 def load(settings: Settings, llm: bool = True):
@@ -35,7 +36,8 @@ def load(settings: Settings, llm: bool = True):
 def print_sources(hits, full: bool) -> None:
     print("\nSources:")
     for i, h in enumerate(hits, 1):
-        print(f"  [{i}] {h.passage.citation}  score={h.score:.3f}  p.{h.passage.page}")
+        page = f"  p.{h.passage.page}" if h.passage.page else ""
+        print(f"  [{i}] {h.passage.citation}  score={h.score:.3f}{page}")
         if full:
             print(f"      {h.passage.text}")
 
@@ -65,6 +67,25 @@ def question_of(args) -> str:
     if not q:
         raise SystemExit('Please ask a question, e.g. bible-rag ask "What is love?"')
     return q
+
+
+def cmd_versions(args, settings):
+    from .index import index_is_current
+
+    for vid, v in VERSIONS.items():
+        state = "selected" if vid in settings.versions else "available"
+        if any(index_is_current(d, vid) for d in settings.index_dir.glob(f"*/{vid}")):
+            state += ", indexed"
+        print(
+            f"{'✓' if v.public else '✗'} {vid:8s} {v.name} [{state}]\n"
+            f"    license: {v.license}{'' if v.public else '  (NOT for public use)'}\n"
+            f"    source:  {v.source}" + (f"\n    note:    {v.conditions}" if v.conditions else "")
+        )
+    allowed = "allowed" if settings.allow_restricted else "refused"
+    print(
+        f"\nSelected: {','.join(settings.versions)} (BIBLE_RAG_VERSIONS). "
+        f"Restricted versions: {allowed} (BIBLE_RAG_ALLOW_RESTRICTED)."
+    )
 
 
 def cmd_models(args, settings):
@@ -165,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("versions", help="Bible texts and licenses").set_defaults(func=cmd_versions)
     p = sub.add_parser("models", help="usable embedders / LLMs")
     p.add_argument("--test", action="store_true", help="also load each LLM and generate")
     p.set_defaults(func=cmd_models)
@@ -181,7 +203,7 @@ def build_parser() -> argparse.ArgumentParser:
         if has_q:
             p.add_argument("question", nargs="*", help="question (or stdin)")
         p.add_argument("-k", type=int, help="passages per version")
-        p.add_argument("--versions", type=versions_arg, help="e.g. kjv or kjv,rvr1960")
+        p.add_argument("--versions", type=versions_arg, help="e.g. kjv or kjv,rv1909")
         p.add_argument("--show-context", action="store_true", help="print passage texts")
         p.set_defaults(func=func)
     p = sub.add_parser("eval", help="measure quality")

@@ -1,10 +1,8 @@
-"""Parse the two Bible PDFs into verse-referenced passages.
+"""Text model shared by all sources: books, verses (Unit), passages, chunking.
 
-KJV (XEP): one chapter per page, footer "<page> / <Book chapter>", each verse starts a line
-with its number glued on ("21It devoureth") -> exact verse references.
-RVR1960 (pdfTeX): header with the page's verse range ("4. 15–5. 9 Génesis 6"), verse numbers
-in the margin mark the *line* where a verse starts -> line-accurate references.
-Both parsers yield Units (a verse / a printed line) that chunk_units() packs into Passages.
+Also the parser for the RVR1960 PDF (personal-use option, see sources.py): its header gives the
+page's verse range ("4. 15–5. 9 Génesis 6") and verse numbers sit in the margin, marking the
+*line* where a verse starts, so references are line-accurate.
 """
 
 from __future__ import annotations
@@ -15,47 +13,41 @@ from collections import Counter
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
 
 SOFT_HYPHEN = "\u00ad"  # our marker: word continues on the next line
 PDFIUM_SOFT_HYPHEN = "\ufffe"  # how pdfium reports TeX discretionary hyphens
 
 
-class Version(NamedTuple):
-    label: str  # shown in citations
-    name: str
-    language: str
-    filename: str
-
-
-VERSIONS = {
-    "kjv": Version("KJV", "King James Version", "en", "kjv.pdf"),
-    "rvr1960": Version("RVR1960", "Reina-Valera 1960", "es", "biblia-reina-valera-1960.pdf"),
-}
-
-# Canonical order, names as the parsers produce them (KJV, RVR1960).
+# Canonical order: (OSIS code, English name, Spanish name as printed in the RVR PDFs).
 # fmt: off
 BOOKS = [
-    ("Genesis", "Génesis"), ("Exodus", "Éxodo"), ("Leviticus", "Levítico"), ("Numbers", "Números"),
-    ("Deuteronomy", "Deuteronomio"), ("Joshua", "Josué"), ("Judges", "Jueces"), ("Ruth", "Rut"),
-    ("1 Samuel", "1 Samuel"), ("2 Samuel", "2 Samuel"), ("1 Kings", "1 Reyes"),
-    ("2 Kings", "2 Reyes"), ("1 Chronicles", "1 Crónicas"), ("2 Chronicles", "2 Crónicas"),
-    ("Ezra", "Esdras"), ("Nehemiah", "Nehemías"), ("Esther", "Ester"), ("Job", "Job"),
-    ("Psalm", "Salmos"), ("Proverbs", "Proverbios"), ("Ecclesiastes", "Eclesiastés"),
-    ("Song of Solomon", "Cantar de los Cantares"), ("Isaiah", "Isaías"), ("Jeremiah", "Jeremías"),
-    ("Lamentations", "Lamentaciones"), ("Ezekiel", "Ezequiel"), ("Daniel", "Daniel"),
-    ("Hosea", "Oseas"), ("Joel", "Joel"), ("Amos", "Amós"), ("Obadiah", "Abdías"),
-    ("Jonah", "Jonás"), ("Micah", "Miqueas"), ("Nahum", "Nahum"), ("Habakkuk", "Habacuc"),
-    ("Zephaniah", "Sofonías"), ("Haggai", "Hageo"), ("Zechariah", "Zacarías"),
-    ("Malachi", "Malaquías"), ("Matthew", "Mateo"), ("Mark", "Marcos"), ("Luke", "Lucas"),
-    ("John", "Juan"), ("Acts", "Hechos"), ("Romans", "Romanos"), ("1 Corinthians", "1 Corintios"),
-    ("2 Corinthians", "2 Corintios"), ("Galatians", "Gálatas"), ("Ephesians", "Efesios"),
-    ("Philippians", "Filipenses"), ("Colossians", "Colosenses"),
-    ("1 Thessalonians", "1 Tesalonicenses"), ("2 Thessalonians", "2 Tesalonicenses"),
-    ("1 Timothy", "1 Timoteo"), ("2 Timothy", "2 Timoteo"), ("Titus", "Tito"),
-    ("Philemon", "Filemón"), ("Hebrews", "Hebreos"), ("James", "Santiago"), ("1 Peter", "1 Pedro"),
-    ("2 Peter", "2 Pedro"), ("1 John", "1 Juan"), ("2 John", "2 Juan"), ("3 John", "3 Juan"),
-    ("Jude", "Judas"), ("Revelation", "Apocalipsis"),
+    ("Gen", "Genesis", "Génesis"), ("Exod", "Exodus", "Éxodo"), ("Lev", "Leviticus", "Levítico"),
+    ("Num", "Numbers", "Números"), ("Deut", "Deuteronomy", "Deuteronomio"),
+    ("Josh", "Joshua", "Josué"), ("Judg", "Judges", "Jueces"), ("Ruth", "Ruth", "Rut"),
+    ("1Sam", "1 Samuel", "1 Samuel"), ("2Sam", "2 Samuel", "2 Samuel"),
+    ("1Kgs", "1 Kings", "1 Reyes"), ("2Kgs", "2 Kings", "2 Reyes"),
+    ("1Chr", "1 Chronicles", "1 Crónicas"), ("2Chr", "2 Chronicles", "2 Crónicas"),
+    ("Ezra", "Ezra", "Esdras"), ("Neh", "Nehemiah", "Nehemías"), ("Esth", "Esther", "Ester"),
+    ("Job", "Job", "Job"), ("Ps", "Psalms", "Salmos"), ("Prov", "Proverbs", "Proverbios"),
+    ("Eccl", "Ecclesiastes", "Eclesiastés"), ("Song", "Song of Solomon", "Cantar de los Cantares"),
+    ("Isa", "Isaiah", "Isaías"), ("Jer", "Jeremiah", "Jeremías"),
+    ("Lam", "Lamentations", "Lamentaciones"), ("Ezek", "Ezekiel", "Ezequiel"),
+    ("Dan", "Daniel", "Daniel"), ("Hos", "Hosea", "Oseas"), ("Joel", "Joel", "Joel"),
+    ("Amos", "Amos", "Amós"), ("Obad", "Obadiah", "Abdías"), ("Jonah", "Jonah", "Jonás"),
+    ("Mic", "Micah", "Miqueas"), ("Nah", "Nahum", "Nahum"), ("Hab", "Habakkuk", "Habacuc"),
+    ("Zeph", "Zephaniah", "Sofonías"), ("Hag", "Haggai", "Hageo"),
+    ("Zech", "Zechariah", "Zacarías"), ("Mal", "Malachi", "Malaquías"),
+    ("Matt", "Matthew", "Mateo"), ("Mark", "Mark", "Marcos"), ("Luke", "Luke", "Lucas"),
+    ("John", "John", "Juan"), ("Acts", "Acts", "Hechos"), ("Rom", "Romans", "Romanos"),
+    ("1Cor", "1 Corinthians", "1 Corintios"), ("2Cor", "2 Corinthians", "2 Corintios"),
+    ("Gal", "Galatians", "Gálatas"), ("Eph", "Ephesians", "Efesios"),
+    ("Phil", "Philippians", "Filipenses"), ("Col", "Colossians", "Colosenses"),
+    ("1Thess", "1 Thessalonians", "1 Tesalonicenses"),
+    ("2Thess", "2 Thessalonians", "2 Tesalonicenses"), ("1Tim", "1 Timothy", "1 Timoteo"),
+    ("2Tim", "2 Timothy", "2 Timoteo"), ("Titus", "Titus", "Tito"), ("Phlm", "Philemon", "Filemón"),
+    ("Heb", "Hebrews", "Hebreos"), ("Jas", "James", "Santiago"), ("1Pet", "1 Peter", "1 Pedro"),
+    ("2Pet", "2 Peter", "2 Pedro"), ("1John", "1 John", "1 Juan"), ("2John", "2 John", "2 Juan"),
+    ("3John", "3 John", "3 Juan"), ("Jude", "Jude", "Judas"), ("Rev", "Revelation", "Apocalipsis"),
 ]
 # fmt: on
 
@@ -71,8 +63,8 @@ class Passage:
     verse_start: int
     verse_end: int
     text: str
-    page: int  # 1-based PDF page
-    section: str  # OT | NT | Apocrypha
+    page: int = 0  # 1-based PDF page (PDF sources only)
+    section: str = ""  # OT | NT
 
     @property
     def reference(self) -> str:
@@ -128,71 +120,6 @@ def join_units_text(units: Iterable[Unit]) -> str:
         out.append(glue + u.text)
         glue = "" if u.join_next else " "
     return re.sub(r"\s+", " ", "".join(out)).strip()
-
-
-# ----------------------------------------------------------------------------------- KJV
-_KJV_SECTIONS = {
-    "Old Testament": "OT",
-    "Apocryphal or Deuterocanonical Books": "Apocrypha",
-    "New Testament": "NT",
-}
-_KJV_FOOTER = re.compile(r"^(.+?) (\d+)$")
-_KJV_VERSE = re.compile(r"^(\d{1,3})(?![\d,:])(.*)$")  # "21It devoureth" or a bare "5"
-
-
-def _kjv_footer(lines: list[str]) -> tuple[str, list[str]]:
-    """Split off the running footer; pdfium yields [title,] page number, title."""
-    if not lines:
-        return "", lines
-    title, body = lines[-1], lines[:-1]
-    while body and (body[-1] == title or body[-1].isdigit()):
-        body.pop()
-    return title, body
-
-
-def parse_kjv(pages: list[str]) -> Iterator[Unit]:
-    section = book = current_book = None
-    chapter = verse = 0
-    current: Unit | None = None
-    for idx, raw in enumerate(pages):
-        # pdfium keeps hyphenated words on one line with U+FFFE: "be\ufffecame"
-        footer, body = _kjv_footer(_lines(normalize(raw).replace(PDFIUM_SOFT_HYPHEN, "")))
-        if footer in _KJV_SECTIONS:
-            section = _KJV_SECTIONS[footer]
-            continue
-        if footer == "Indexes":
-            break
-        if section is None or not footer:
-            continue  # front matter, table of contents, preface
-        m = _KJV_FOOTER.match(footer)
-        if not m:
-            book = footer  # book title page
-            continue
-        if m[1] != "Chapter":  # Susanna / Bel use "Chapter N" as footer
-            book = m[1]
-        if book is None:
-            continue
-        if (book, int(m[2])) != (current_book, chapter):  # new chapter (also Obadiah 1 -> Jonah 1)
-            if current:
-                yield current
-                current = None
-            current_book, chapter, verse = book, int(m[2]), 0
-        for line in body:
-            if line == book or re.match(r"^Chapter \d+$", line):
-                continue
-            vm = _KJV_VERSE.match(line)
-            if vm and verse < int(vm[1]) <= verse + 3:  # tolerate a missed number
-                if current:
-                    yield current
-                verse = int(vm[1])
-                current = Unit(book, chapter, verse, verse, vm[2].strip(), idx + 1, section)
-            elif current is None and verse == 0:  # verse 1 has no number
-                verse = 1
-                current = Unit(book, chapter, 1, 1, line, idx + 1, section)
-            elif current is not None:
-                current.text = f"{current.text} {line}" if current.text else line
-    if current:
-        yield current
 
 
 # ------------------------------------------------------------------------------- RVR1960
@@ -329,15 +256,15 @@ def resolve_line_hyphens(units: list[Unit]) -> list[Unit]:
 
 # ------------------------------------------------------------------------------ chunking
 def chunk_units(
-    units: Iterable[Unit], version: Version, size: int, overlap: int
+    units: Iterable[Unit], label: str, language: str, size: int, overlap: int
 ) -> Iterator[Passage]:
     """Pack consecutive units of one chapter into ~size-char passages, overlapping ~overlap."""
 
     def passage(buf: list[Unit]) -> Passage:
         u = buf[0]
         return Passage(
-            version.label,
-            version.language,
+            label,
+            language,
             u.book,
             u.chapter,
             min(x.verse_start for x in buf),
@@ -364,16 +291,3 @@ def chunk_units(
         used += len(unit.text) + 1
     if buf:
         yield passage(buf)
-
-
-def load_version(
-    version_id: str, data_dir: Path, size: int, overlap: int, include_apocrypha: bool = False
-) -> list[Passage]:
-    version = VERSIONS[version_id]
-    pdf = data_dir / version.filename
-    if not pdf.exists():
-        raise FileNotFoundError(f"{version.name}: PDF not found at {pdf}")
-    parser = parse_kjv if version_id == "kjv" else parse_rvr
-    units = resolve_line_hyphens(list(parser(extract_pages(pdf))))
-    units = [u for u in units if include_apocrypha or u.section != "Apocrypha"]
-    return list(chunk_units(units, version, size, overlap))

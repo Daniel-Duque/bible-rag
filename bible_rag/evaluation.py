@@ -9,7 +9,7 @@ import time
 from .corpus import BOOKS
 from .grounding import book_index
 
-_IDX = {en: i for i, (en, _) in enumerate(BOOKS)}
+_IDX = {en: i for i, (_, en, _) in enumerate(BOOKS)}
 
 # (English question, Spanish question, gold chapters as (KJV book, chapter))
 GOLD = [
@@ -26,7 +26,7 @@ GOLD = [
     (
         "Who is my shepherd according to the psalm?",
         "¿Quién es mi pastor según el salmo?",
-        [("Psalm", 23), ("John", 10)],
+        [("Psalms", 23), ("John", 10)],
     ),
     (
         "Why did God give his only begotten Son?",
