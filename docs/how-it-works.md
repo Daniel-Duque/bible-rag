@@ -6,8 +6,9 @@ indexes are prepared, and how well it works. For installing and using it, see th
 
 - [Overview](#overview)
 - [Routing: which kind of question](#routing-which-kind-of-question)
-- [The three pipelines](#the-three-pipelines)
+- [The four pipelines](#the-four-pipelines)
 - [Contradictions: the two sides](#contradictions-the-two-sides)
+- [Subjects the Bible never names: related concepts](#subjects-the-bible-never-names-related-concepts)
 - [Translations and the original languages](#translations-and-the-original-languages)
 - [The lexicon](#the-lexicon)
 - [Writing and checking the answer](#writing-and-checking-the-answer)
@@ -20,12 +21,16 @@ indexes are prepared, and how well it works. For installing and using it, see th
 ```
 question
   -> route by meaning: direct / contradiction / translation               semantic.py
+     (a subject the Bible never names: related concepts)
   -> run the pipeline                                                     agent.py
        direct:         hybrid search in each translation
        contradiction:  topic -> its words in each translation + a search for the affirming
                        and the opposing statement -> stance of each passage -> two sides
        translation:    the verses cited, or the passages where the versions word a topic
                        differently
+       related:        what the texts say of the subject's words + the biblical themes
+                       closest to it (anchor verses + a search) -> one section per theme,
+                       with how it relates                                themes.py
   -> the same verses in every other translation and in the Hebrew / Greek     align.py
   -> notes: wording differences, the original word (Strong's), known traps
   -> prompt for that kind of question -> first working LLM of the chain        rag.py
@@ -33,7 +38,7 @@ question
 ```
 
 Every step works without a language model. The LLM writes the synthesis and, when it is
-capable enough, helps with two planning decisions (see below); without it the answer is the
+capable enough, helps with three planning decisions (see below); without it the answer is the
 lead sentence and the passages.
 
 ## Routing: which kind of question
@@ -50,14 +55,24 @@ so the decisions are made with the multilingual embedder (`bible_rag/semantic.py
   (not the small fallback) decides, if one is loaded and `BIBLE_RAG_LLM_PLANNING` is on.
   Otherwise the direct search is used, which also shows every translation, and the answer says
   it was unsure ("unsure between translation and general").
+- **Named in the Bible or not.** Unless the question compares translations or cites verses, its
+  subject is also checked: does the Bible name it at all? A subject that is nearer in meaning
+  to things the Bible never names (cellphones, video games…) and has no word in the Bible's own
+  vocabulary (Argentina, ChatGPT) goes to the related concepts, however it is phrased. See [below](#subjects-the-bible-never-names-related-concepts).
 - **Asking for a task.** Routing can be overridden: the web chat's buttons under the last
-  answer, `bible-rag ask --task …`, the chat's `/contradiction` and `/translation` commands,
-  and the API's `task` field run the chosen pipeline directly ("as requested").
+  answer, `bible-rag ask --task …`, the chat's `/contradiction`, `/translation` and `/related`
+  commands, and the API's `task` field run the chosen pipeline directly ("as requested").
 - **Topic.** The question's task ("are there contradictions…") is projected out of its vector;
   what is left, its subject, is compared with the lexicon's topics and with 52 other Bible
   subjects. The threshold is calibrated per embedder from questions about those other
   subjects, so "jewelry" or "astrology" are recognised as subjects of their own, while
-  "drinking beer" or "self-defence" are recognised as alcohol and war.
+  "drinking beer" or "self-defence" are recognised as alcohol and war. A topic that is only
+  near (closer than the threshold, but not closer than any question about another subject
+  comes) is kept only if the question's subject words are the topic's words in the Bible's
+  vocabulary: "¿Hay contradicciones sobre el sexo?" comes near slavery by meaning, but "sexo"
+  is none of its words (*esclavo, siervo…*), so it is searched as a subject of its own;
+  "¿avaricia?" is as near to money, and *avaricia* is one of its words. Every task uses this
+  one topic.
 - **Subject words**, for a topic outside the lexicon, are found by leaving each word out of the
   question: removing a subject word moves the subject, removing a task word lowers the
   question's intent score. No word lists are involved.
@@ -69,7 +84,7 @@ so the decisions are made with the multilingual embedder (`bible_rag/semantic.py
 The example texts' embeddings are cached per embedder (`semantics-<embedder>.npz`; the
 bundled embedder's copy ships in `storage/prebuilt/`).
 
-## The three pipelines
+## The four pipelines
 
 **Direct questions** ("Where was Jesus born?") run a hybrid search in each translation:
 embeddings and BM25 keywords, fused by reciprocal rank, because keywords find names
@@ -77,7 +92,12 @@ embeddings and BM25 keywords, fused by reciprocal rank, because keywords find na
 Passages are cut independently per version (KJV Matthew 2:1-3, RV1909 Mateo 2:1-4), so the
 chunk covering the same verses is looked up in each, and the sentence that answers is quoted
 from each. An English question thus shows Mateo 2:1 next to Matthew 2:1, although the Spanish
-keyword index could never match it.
+keyword index could never match it. When the question is about a lexicon topic, the
+words the texts use for the part of it asked about join the keywords, prefixes expanded to
+each text's words: "¿Es pecado emborracharse?" searches *embriaguez, embriagarse, borracho…*
+too, instead of being drawn by "pecado" to the same passages on sin for every sin (Romans 7,
+and Leviticus 5 with its oaths). Outside the lexicon, a subject word the Bible words
+otherwise brings the Bible's word (*glotonería* → *glotón*; *España*: Romans 15:24).
 
 **Contradiction questions** ("Are there any paradoxes in the Bible according to alcohol?")
 find the topic and its words in each translation, gather the passages that name it plus a
@@ -93,6 +113,11 @@ differ on hell?"), the passages where the versions word it with different concep
 14:9: KJV "Hell", RV1909 "sepulcro", WEB "Sheol"). Passages whose versions use the most
 distinct concepts come first. Without a reference or a known topic, the passages found by a
 direct search on the question's subject are compared.
+
+**Questions about something the Bible never names** ("Should I use a cellphone?") say so,
+with what was checked, and show the biblical themes closest to the subject, each with how it
+relates (details [below](#subjects-the-bible-never-names-related-concepts)). The LLM is asked
+to explain each link and to keep clear that applying the passages is an inference.
 
 ## Contradictions: the two sides
 
@@ -121,6 +146,50 @@ direct search on the question's subject are compared.
 - **The original words of each side.** The notes count the Hebrew or Greek words behind each
   side and say whether both use the same one ("Both sides use H3196 yayin: the tension is in
   the original text, not a translation choice").
+
+## Subjects the Bible never names: related concepts
+
+Cellphones, video games or Argentina are not in the Bible, but it speaks of what they have
+to do with: letters and messengers, being mastered by a habit, the nations. A direct search
+for "cellphone" only finds passages that happen to lie near the word (Job 6, Micah 6), so
+these questions get a task of their own (`Planner.absence` and `Planner.related`).
+
+**Is it named?** One score adds up two kinds of meaning:
+
+- *what the subject is like*: the subject (the question minus its task) and its subject words
+  are compared with 47 things the Bible never names (*cellphones, vaccines…*) and 109 it does
+  (the other Bible subjects, the lexicon's topics, *horses, taxes, astrologers…*). This
+  catches homonyms: KJV "tablets" are of stone, its "smoking" is a furnace.
+- *whether the Bible has a word for it*: each subject word is looked up in the Bible's own
+  vocabulary (the first translation of each language, embedded with its index). "España"
+  (Romans 15:24) and "astrology" (*astrólogos*) have one; "Argentina" (nearest: *Italia*),
+  "celular" or "ChatGPT" don't. This needs no list of countries or products. A subject that
+  surely is a lexicon topic has that topic's words ("emborracharse": *embriagarse*).
+
+Without subject words the meaning alone must be clear (beyond 0.05), so "Are there
+contradictions in the Bible?" is never sent here. Close calls (within 0.05) go to a capable
+LLM if one is loaded. The answer shows what was checked: "“cellphone” does not occur in KJV
+and WEB", or where the word does occur ("“smoking” occurs in KJV (1 passage: Genesis 15:17)"),
+and the lead then says the Bible doesn't speak of it *as such*.
+
+**Related themes** (`bible_rag/themes.py`): 31 biblical themes, each with example phrases
+matched by meaning ("Telegram" finds communication without being listed), a statement in the
+Bible's register that is searched for, 4-5 anchor verses and a *link* saying in what respect a
+subject relates ("in so far as it can become a habit that masters a person"). The best theme
+and those within 0.12 of it are shown, three sections at most; when the question asks whether
+something is right ("Should I…?"), one of them is a *frame*: the Bible's own principles for
+choices it doesn't name (1 Corinthians 10:23, Romans 14:23). Every anchor was read in the KJV
+and the RV1909 in context, and popular proof-texts that speak of something else (Daniel 12:4
+for technology, Numbers 35:33 for pollution) were left out; a test checks that each exists.
+Per theme, its anchors and the passages closest to its statement are ranked by closeness to it
+plus half the closeness to the subject (for a cellphone, 2 John 1:12 "I would not write with
+paper and ink" comes first), one per chapter, then aligned across translations.
+
+**What the answer claims.** The lead says the Bible does not mention the subject, lists the
+themes and adds that "the passages below are about those, not about cellphone: applying them
+to it is an inference". Asked for a subject the Bible does name (`--task related` on "wine"),
+it says so. The LLM gets the same facts ("What the search found") and is told not to claim
+the Bible speaks of the subject.
 
 ## Translations and the original languages
 
@@ -172,8 +241,9 @@ outside the lexicon still work, by meaning alone (see [Quality](#quality)).
 
 The prompt depends on the kind of question. Each gives the LLM the passages grouped as they
 will be shown, the translation notes, and the task: answer and cite; weigh whether the two
-groups really contradict each other; or compare the renderings and say whether the
-difference changes the sense. The answer is written in the question's language (English,
+groups really contradict each other; compare the renderings and say whether the difference
+changes the sense; or, for a subject the Bible never names, say so, explain how each group of
+passages relates to it and keep the application visibly an inference. The answer is written in the question's language (English,
 Spanish, Portuguese, French, German or Italian, identified by function words).
 
 The model's words are then checked (`bible_rag/grounding.py`). Every reference ("John 3:16",
@@ -260,14 +330,36 @@ or NLI model. None of its questions is among the routing or topic examples:
 
 | | |
 |---|---|
-| routing of 37 questions in English, Spanish, Portuguese, French, German and Italian | 100 % |
-| topic of 40 questions (26 lexicon topics in paraphrase, 14 subjects outside the lexicon) | 100 % |
+| routing of 51 questions in English, Spanish, Portuguese, French, German and Italian (13 of them about subjects the Bible never names) | 100 % |
+| topic of 47 questions (29 lexicon topics in paraphrase, 18 other subjects, 4 of them near a topic by meaning: sex, polygamy, suicide, the salvation of children) | 100 % |
 | contradiction questions on six topics (alcohol, war, food, faith and works, divorce, seeing God): share of the passages on each side that are well-known passages for that side, k = 3 | 78 % |
 | the same six, ignoring the lexicon (meaning only, generic statements) | 19 % |
+| direct questions "is it a sin to…?" on ten sins, in English and Spanish: a passage on that sin among the first three | 70 % (40 % without the Bible's words for it) |
 
-The last line is the hard case. Without the lexicon's statements, an LLM to write them or an
+The 19 % line is the hard case. Without the lexicon's statements, an LLM to write them or an
 NLI model, a generic "X is good" / "X is evil" can't express "faith vs works" or "seeing God
 vs no one can see God". The LLM and the NLI model could not be measured in the offline
 environment where these figures were taken: run `bible-rag eval --agent` where they are
 available. The planner's weights and thresholds were tuned on the bundled embedder; re-check
 with the same command after changing models.
+
+For subjects the Bible never names:
+
+| | |
+|---|---|
+| 25 questions in six languages (inventions, products, new countries): recognised as such | 96 % |
+| 48 questions on subjects it names (Italy and Spain included) or without a subject: wrongly said to be never named | 0 % |
+| the same 25: a related theme that fits among those chosen / share of the chosen that fit | 96 % / 79 % |
+
+The score's weights were fitted on questions that include these, so the figures are
+optimistic. On 78 other questions written before measuring, it recognised 32 of the 38
+subjects the Bible never names (13 with the example lists alone) and said it of none of the
+40 others; the six missed (Venezuela, therapy, psicólogo, potatoes, Halloween twice) are close
+calls, which a capable LLM settles. Two expected answers were corrected after reading the
+texts: the KJV says "We have mortgaged our lands" (Nehemiah 5:3), and the RV1909 has "gatos
+cervales" (Isaiah 13:22). Known weaknesses: a name made of ordinary words ("Estados Unidos")
+looks named; "comunismo" is drawn to the theme of *comunión*; a sin outside the lexicon
+(laziness, revenge) can still draw the direct search to passages on sin in general; and, as
+before this feature, "Is Spain in the Bible?" is routed to the translation comparison
+(`--task general` asks for a direct search).
+

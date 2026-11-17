@@ -104,7 +104,7 @@ def create_app(rag, api_key: str = "", rate: int = 30, concurrency: int = 2, doc
         k: int | None = Field(None, ge=1, le=MAX_K)
         versions: list[str] | None = Field(None, max_length=len(VERSIONS))
         # None: the assistant chooses; else the pipeline asked for
-        task: Literal["general", "contradiction", "translation"] | None = None
+        task: Literal["general", "contradiction", "translation", "related"] | None = None
 
         @field_validator("versions")
         @classmethod

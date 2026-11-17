@@ -1,5 +1,6 @@
 """Decisions by meaning instead of keywords, with the multilingual embedder: what a question
-asks (routing), what it is about (topic), and which way a text leans (opposition). Examples
+asks (routing), what it is about (topic), whether the Bible names it at all (absence), which
+biblical themes bear on it (themes.py), and which way a text leans (opposition). Examples
 are given in English and Spanish, but the embedder places other languages in the same space,
 so "Existem paradoxos na Bíblia sobre o álcool?" is routed and matched like its English form.
 
@@ -24,11 +25,14 @@ from pathlib import Path
 import numpy as np
 
 from .lexicon import TOPICS, Topic
+from .themes import THEMES, Theme, theme_examples
 
 log = logging.getLogger(__name__)
 
 GENERAL, CONTRADICTION, TRANSLATION = "general", "contradiction", "translation"
-INTENTS = (GENERAL, CONTRADICTION, TRANSLATION)
+RELATED = "related"  # a subject the Bible doesn't name: the biblical themes related to it
+ROUTES = (GENERAL, CONTRADICTION, TRANSLATION)  # told apart by how a question is phrased
+INTENTS = (*ROUTES, RELATED)  # every task; RELATED is told by the subject (Planner.absence)
 
 # Example questions per intent, on varied subjects so that the subject doesn't decide
 INTENT_EXAMPLES = {
@@ -163,6 +167,88 @@ OTHER_TOPICS = [
     "la sabiduría",
 ]
 
+# Whether the Bible names a subject at all. A subject nearer to the things it never names than
+# to the things it does is answered with related themes instead (agent.Planner.related).
+# Subjects the Bible names, though often in other words (alcohol: wine; astrology: the
+# astrologers of Babylon), besides OTHER_TOPICS and the lexicon's topics:
+NAMED_SUBJECTS = [
+    "horses",
+    "kings and kingdoms",
+    "farming and the harvest",
+    "fishing",
+    "shepherds and sheep",
+    "taxes",
+    "physicians",
+    "jewels and ornaments",
+    "astrologers and stargazers",
+    "witchcraft and sorcery",
+    "dreams",
+    "ships and the sea",
+    "letters and writing",
+    "merchants and trade",
+    "lending and usury",
+    "swords and spears",
+    "los caballos",
+    "los reyes",
+    "la cosecha",
+    "la pesca",
+    "los impuestos",
+    "las joyas",
+    "la hechicería",
+    "los sueños",
+    "los barcos",
+]
+# Things that did not exist, or were not spoken of, when the Bible was written
+UNNAMED_SUBJECTS = [
+    "cellphones and smartphones",
+    "the internet",
+    "social media",
+    "video games",
+    "television",
+    "computers",
+    "artificial intelligence",
+    "cars and driving",
+    "airplanes",
+    "electricity",
+    "vaccines",
+    "organ transplants",
+    "in vitro fertilization",
+    "cloning",
+    "nuclear weapons",
+    "guns and firearms",
+    "smoking cigarettes",
+    "marijuana and recreational drugs",
+    "cryptocurrency",
+    "the stock market",
+    "credit cards",
+    "online dating",
+    "plastic surgery",
+    "democracy and voting",
+    "climate change",
+    "space travel",
+    "dinosaurs",
+    "evolution",
+    "movies and cinema",
+    "email and text messages",
+    "photography and selfies",
+    "insurance",
+    "the lottery",
+    "los teléfonos celulares",
+    "las redes sociales",
+    "los videojuegos",
+    "la televisión",
+    "la inteligencia artificial",
+    "los coches",
+    "las vacunas",
+    "las criptomonedas",
+    "fumar cigarrillos",
+    "las drogas",
+    "las citas por internet",
+    "la cirugía plástica",
+    "los dinosaurios",
+    "el cine",
+]
+
 _NULL_TEMPLATES = (
     "What does the Bible say about {}?",
     "Are there contradictions in the Bible about {}?",
@@ -223,7 +309,9 @@ class Semantics:
         self._intents: dict[str, np.ndarray] | None = None
         self._topics: list[tuple[Topic | None, np.ndarray]] | None = None
         self._axis: np.ndarray | None = None
-        self._threshold: float | None = None
+        self._threshold: tuple[float, float] | None = None  # topic: threshold, certainty
+        self._subjects: tuple[np.ndarray, np.ndarray] | None = None  # named, unnamed
+        self._themes: list[tuple[Theme, np.ndarray]] | None = None
         # embeddings of the fixed texts (examples, topics, pairs), kept on disk: a new process
         # computes none of them; changing an example re-embeds only that one
         self.cache, self._known = cache, {}
@@ -300,11 +388,21 @@ class Semantics:
         """How close a question must be to a lexicon topic to be about it: the 90th
         percentile of the closeness of questions about *other* subjects ("What does the Bible
         say about prayer?"), computed for this embedder, whose similarity scale is its own."""
+        return self._null_scores()[0]
+
+    @property
+    def topic_certainty(self) -> float:
+        """Closer to a lexicon topic than any question about another subject comes: the
+        subject surely is that topic ("¿Puedo emborracharme?" is alcohol; "Are energy drinks a
+        sin?" only resembles it)."""
+        return self._null_scores()[1]
+
+    def _null_scores(self) -> tuple[float, float]:
         with self._lock:
             if self._threshold is None:
                 questions = [t.format(o) for o in OTHER_TOPICS for t in _NULL_TEMPLATES]
                 scores = [self._best(self.subject(v))[1] for v in self.fixed(questions)]
-                self._threshold = float(np.quantile(scores, 0.9))
+                self._threshold = (float(np.quantile(scores, 0.9)), float(max(scores)))
         return self._threshold
 
     def _best(self, vec: np.ndarray) -> tuple[Topic | None, float]:
@@ -347,6 +445,65 @@ class Semantics:
             for w, task, moved in found
             if task < 0.7 * most_task and task < 0.25 * moved and moved >= 0.35 * most_moved
         ]
+
+    # ----------------------------------------------------------------------- absence
+    @property
+    def subjects(self) -> tuple[np.ndarray, np.ndarray]:
+        """Embedded subjects the Bible names (with the other topics and the lexicon's) and
+        subjects it never names."""
+        with self._lock:
+            if self._subjects is None:
+                topics = [t.name[lang] for t in TOPICS for lang in ("en", "es")]
+                named = list(dict.fromkeys([*OTHER_TOPICS, *topics, *NAMED_SUBJECTS]))
+                self._subjects = (self.fixed(named), self.fixed(UNNAMED_SUBJECTS))
+        return self._subjects
+
+    def absence_views(self, subject: np.ndarray, words: np.ndarray | None = None) -> list[float]:
+        """How much closer a subject is to the things the Bible never names than to the
+        things it does (> 0: absent), and the same for its words (see `subject_words`) if
+        given: each side's score is the mean similarity of its `top` closest examples, as in
+        routing."""
+        named, unnamed = self.subjects
+
+        def closeness(examples, v):
+            return float(np.sort(examples @ v)[-self.top :].mean())
+
+        views = [subject] if words is None else [subject, words]
+        return [closeness(unnamed, v) - closeness(named, v) for v in views]
+
+    # ------------------------------------------------------------------------ themes
+    @property
+    def themes(self) -> list[tuple[Theme, np.ndarray]]:
+        with self._lock:
+            if self._themes is None:
+                self._themes = [(t, self.fixed(theme_examples(t))) for t in THEMES]
+        return self._themes
+
+    def theme_scores(
+        self, subject: np.ndarray, words: np.ndarray | None = None
+    ) -> list[tuple[Theme, float]]:
+        """The biblical themes (themes.py, frames excluded) by closeness to a subject, best
+        first: a theme's score is its closest example's similarity, averaged over the
+        subject and its words like `absence_views`."""
+        views = [subject] if words is None else [subject, words]
+        scored = [
+            (t, float(np.mean([(vs @ v).max() for v in views])))
+            for t, vs in self.themes
+            if not t.frame
+        ]
+        return sorted(scored, key=lambda s: s[1], reverse=True)
+
+    def frames(self, qvec: np.ndarray) -> list[tuple[Theme, float]]:
+        """Frame themes by closeness to the whole question (they are about asking whether
+        something is right, not about a subject)."""
+        return [(t, float((vs @ qvec).max())) for t, vs in self.themes if t.frame]
+
+    def warm(self) -> None:
+        """Embed (and cache) every fixed text now rather than on the first question."""
+        self.topic_threshold  # noqa: B018
+        self.axis  # noqa: B018
+        self.subjects  # noqa: B018
+        self.themes  # noqa: B018
 
     # --------------------------------------------------------------------- opposition
     @property

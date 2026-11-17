@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 # language, so they can't tell it): the answer is written in the question's language
 _PROFILES = {
     "en": "the of and to is are was what how where who why which does did about say says "
-    "bible god lord any there",
+    "bible god lord any there i you my it this that with should can could would will",
     "es": "el la los las del que qué es son por para cómo dónde quién cuál sobre dice biblia "
     "dios hay una un se",
     "pt": "o os as do da dos das que é são para como onde quem sobre diz bíblia deus existem "
@@ -147,9 +147,14 @@ class BibleRAG:
         return cls(settings, embedder, indexes, chain, spec, skipped)
 
     def search(
-        self, question: str, k: int | None = None, versions: list[str] | None = None
+        self,
+        question: str,
+        k: int | None = None,
+        versions: list[str] | None = None,
+        keywords: str = "",
     ) -> list[Hit]:
-        """Top-k passages per version, best first."""
+        """Top-k passages per version, best first. `keywords`: the Bible's own words for what
+        the question is about, added to the keyword side of the search."""
         if not question.strip():
             raise ValueError("The question is empty")
         unknown = set(versions or []) - self.indexes.keys()
@@ -159,7 +164,7 @@ class BibleRAG:
         # searched by keywords (its words: Hebrew / Greek)
         versions = versions or self.planner.searchable(list(self.indexes))
         vector = self.embedder.embed([question])[0]
-        text = question if self.settings.retrieval == "hybrid" else None
+        text = f"{question} {keywords}".strip() if self.settings.retrieval == "hybrid" else None
         k = k or self.settings.top_k
         hits = []
         for v in versions:
@@ -194,10 +199,9 @@ class BibleRAG:
         return notes
 
     def warm_up(self) -> None:
-        """Do the one-time work now rather than on the first question: the example questions'
+        """Do the one-time work now rather than on the first question: the example texts'
         embeddings and the topic threshold (semantic.py), the NLI model if configured."""
-        self.semantics.topic_threshold  # noqa: B018
-        self.semantics.axis  # noqa: B018
+        self.semantics.warm()
         for index in self.indexes.values():  # keyword index, folded text, words' tags
             index.bm25, index.folded, index.tags  # noqa: B018
         if self.chain is not None and self.settings.nli_model:

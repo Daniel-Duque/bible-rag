@@ -36,7 +36,14 @@ from bible_rag.rag import BibleRAG
 from bible_rag.semantic import INTENT_EXAMPLES, semantics_for, unit
 from bible_rag.sources import VERSIONS
 
-from .conftest import FAKE_EMBEDDER, FakeEmbedder, FakeLLM, make_chain, passage
+from .conftest import (
+    FAKE_EMBEDDER,
+    FakeEmbedder,
+    FakeLLM,
+    make_chain,
+    passage,
+    with_bible_vocabularies,
+)
 
 TOPIC = {t.key: t for t in TOPICS}
 
@@ -112,7 +119,7 @@ CORPUS = {
 
 
 @pytest.fixture
-def corpus_rag(tmp_path, meaning):
+def corpus_rag(tmp_path, meaning, bible_vocabularies):
     settings = Settings(
         index_dir=tmp_path / "index",
         prebuilt_dir=tmp_path / "prebuilt",
@@ -124,6 +131,7 @@ def corpus_rag(tmp_path, meaning):
     indexes = {
         v: VersionIndex.build(ps, meaning, {"embedder": FAKE_EMBEDDER}) for v, ps in CORPUS.items()
     }
+    with_bible_vocabularies(indexes, bible_vocabularies)
     rag = BibleRAG(settings, meaning, indexes, make_chain(FakeLLM()), FAKE_EMBEDDER)
     rag.nli = None
     return rag
@@ -211,9 +219,9 @@ def test_each_task_can_be_asked_for(corpus_rag):
 @pytest.mark.parametrize("question,key", evaluation.TOPIC_GOLD)
 def test_topic_by_meaning(corpus_rag, question, key):
     """Paraphrases without the lexicon's words ("shellfish", "self-defence") find their
-    topic; subjects outside the lexicon (jewelry, astrology...) are recognised as such."""
-    sem = corpus_rag.semantics
-    topic, _ = sem.topic(sem.subject(corpus_rag.embedder.embed([question])[0]))
+    topic; subjects outside the lexicon (jewelry, astrology...) are recognised as such, also
+    when they come near a topic by meaning without being it ("sexo" is not slavery)."""
+    topic = Planner(corpus_rag).topic_of(question, corpus_rag.embedder.embed([question])[0])
     assert (topic.key if topic else None) == key
 
 
@@ -545,6 +553,8 @@ def test_homographs_count_only_when_another_version_confirms_them():
 
 # ------------------------------------------------- topics outside the lexicon, by meaning
 def test_expansion_finds_each_translations_words_by_meaning(corpus_rag):
+    for index in corpus_rag.indexes.values():  # the corpus's own words: they are ranked by
+        index._vocabulary = None  # the passages they occur in, which must be the same texts
     planner = Planner(corpus_rag)
     question = "Existem paradoxos na Bíblia sobre o álcool?"  # Portuguese: no such Bible here
     qvec = corpus_rag.embedder.embed([question])[0]

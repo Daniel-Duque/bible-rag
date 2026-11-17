@@ -1,8 +1,12 @@
 """Web chat: `uv run streamlit run app.py`, then open http://localhost:8501.
 
 The assistant reads each question and chooses how to answer it: a direct search, both sides of
-a contradiction, or a comparison of the translations (see bible_rag/agent.py). Buttons under
-the last answer ask the same question with one of the other two tasks."""
+a contradiction, a comparison of the translations or, for a subject the Bible never names, the
+related concepts it does speak of (see bible_rag/agent.py). Buttons under the last answer ask
+the same question with one of the other tasks."""
+
+import hashlib
+from pathlib import Path
 
 import streamlit as st
 
@@ -18,18 +22,29 @@ ROUTE_LABELS = {
     "general": "🔎 Direct search",
     "contradiction": "⚖️ Contradiction search: the two opposite statements were searched",
     "translation": "🌐 Translation comparison",
+    "related": "🧭 Related concepts: the Bible doesn't name this, so its related themes are shown",
 }
 TASK_BUTTONS = {  # ask the same question with another task
     "contradiction": "⚖️ Look for contradictions",
     "translation": "🌐 Compare translations",
+    "related": "🧭 Related concepts",
     "general": "🔎 Direct search",
 }
 
 
-@st.cache_resource(show_spinner=False)
-def get_rag() -> BibleRAG:
+def code_version() -> str:
+    """Changes whenever the assistant's code does (bible_rag/*.py: name, size, time)."""
+    files = sorted((Path(__file__).parent / "bible_rag").glob("*.py"))
+    stamp = ";".join(f"{f.name}:{f.stat().st_size}:{f.stat().st_mtime_ns}" for f in files)
+    return hashlib.sha256(stamp.encode()).hexdigest()[:16]
+
+
+@st.cache_resource(show_spinner=False, max_entries=1)
+def get_rag(code: str) -> BibleRAG:
     """Loaded once per server and shared by all sessions: the API server if configured
-    (BIBLE_RAG_SERVER_URL) and reachable, else the local models."""
+    (BIBLE_RAG_SERVER_URL) and reachable, else the local models. `code` (code_version) keys
+    it: when the code changes while the app runs, Streamlit reloads the changed modules, and
+    the assistant is rebuilt from them instead of answering with the old code."""
     settings = Settings.from_env()
     try:
         rag = open_backend(settings)
@@ -74,7 +89,7 @@ def show_details(item: dict) -> None:
 
 
 with st.spinner("Loading models…"):
-    rag = get_rag()
+    rag = get_rag(code_version())
 
 labels = {VERSIONS[key].label: key for key in rag.indexes}
 with st.sidebar:
@@ -98,13 +113,14 @@ st.caption(
     "Answers cite every loaded translation: "
     + ", ".join(VERSIONS[key].name for key in rag.indexes)
     + ". Ask a direct question (“Where was Jesus born?”), about contradictions "
-    "(“Are there paradoxes in the Bible about alcohol?”) or about translations "
-    "(“How do the versions render Psalm 16:10?”)."
+    "(“Are there paradoxes in the Bible about alcohol?”), about translations "
+    "(“How do the versions render Psalm 16:10?”) or about something the Bible never names "
+    "(“Should I use a cellphone?”)."
 )
 
 
 def task_buttons(item: dict, index: int) -> tuple[str, str] | None:
-    """Buttons under an answer for the two other tasks: (question, task) if one was clicked."""
+    """Buttons under an answer for the other tasks: (question, task) if one was clicked."""
     others = [t for t in TASK_BUTTONS if t != item["intent"]]
     for column, task in zip(st.columns(len(others)), others, strict=True):
         if column.button(TASK_BUTTONS[task], key=f"task-{index}-{task}"):

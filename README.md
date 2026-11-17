@@ -5,18 +5,21 @@ A Bible study assistant for the terminal and the browser. Ask a question in Engl
 from several translations and from the Hebrew and Greek originals, and every reference and
 quote the answer makes is checked against those passages.
 
-The assistant reads each question and picks one of three ways to answer it:
+The assistant reads each question and picks one of four ways to answer it:
 
 | You ask | The assistant |
 |---|---|
 | *Where was Jesus born?* | searches directly and shows what **each translation** says at the passages found |
 | *Are there any paradoxes in the Bible according to alcohol?* | searches for the **affirming and the opposing statement** ("wine is good…" / "wine is a mocker…"), sorts the passages into the two sides, shows both in every translation and weighs whether they really contradict each other |
 | *How do the translations render Psalm 16:10?* | puts the same verses **side by side**, with the Hebrew or Greek, and shows where the wording changes the meaning (KJV "hell", RV1909 "sepulcro", WEB "Sheol": all the Hebrew שְׁאוֹל *she'ôl*) |
+| *Should I use a cellphone?* / *¿Qué dice la Biblia sobre Argentina?* | recognises that the Bible **never names** the subject (nothing close in meaning, no word for it in the Bible's vocabulary) and says so, shows which texts it checked for the word, then gathers the **related concepts** the Bible does speak of (self-control: "I will not be brought under the power of any"; communication: "I would not write with paper and ink… but speak face to face"), each with **how it relates**, making clear that applying them is an inference |
 
 The choice is made by meaning, not by keywords. When a question could be either kind, the
-assistant answers with a direct search, and either of the other two tasks is one click (or one
-option) away: see [Asking for a task](#asking-for-a-task). [How it works](docs/how-it-works.md)
-explains the method and its limits.
+assistant answers with a direct search, and the other tasks are one click (or one option) away:
+see [Asking for a task](#asking-for-a-task). Whether the Bible names a subject at all is also
+judged by meaning, so *"Are there contradictions in the Bible about video games?"* gets the
+related concepts too: the Bible can't contradict itself about something it never mentions.
+[How it works](docs/how-it-works.md) explains the method and its limits.
 
 It runs on an ordinary computer: no GPU is needed, and once installed it also works offline,
 with the bundled models. The search indexes ship with the code, so the first question is
@@ -39,6 +42,7 @@ uv sync                                                   # once: a few GB (PyTo
 uv run bible-rag ask "Where was Jesus born?"
 uv run bible-rag ask "Are there any paradoxes in the Bible according to alcohol?"
 uv run bible-rag ask "How do the translations render Psalm 16:10?"
+uv run bible-rag ask "Should I use a cellphone?"
 uv run bible-rag ask "¿Hay contradicciones en la Biblia sobre el divorcio?"
 ```
 
@@ -56,7 +60,11 @@ uv run streamlit run app.py
 2. **A synthesis** written by the language model. If no capable model is available, a short
    lead sentence takes its place.
 3. **The passages**, quoted from every loaded translation and aligned verse for verse. For a
-   contradiction they are grouped into the two sides. Each row carries notes on the wording:
+   contradiction they are grouped into the two sides. For a subject the Bible never names they
+   are grouped by related concept, each under a line saying how it relates ("How this relates
+   to “cellphone”: in so far as it can become a habit that masters a person"), after a note
+   on what was checked ("“cellphone” does not occur in KJV and WEB", or where the word does
+   occur, as KJV "smoking" in "a smoking furnace"). Each row carries notes on the wording:
    where the translations use different words, which Hebrew or Greek word is behind them
    (Strong's numbers), and known traps such as RV1909 "alcohol", which means eye paint.
 4. **Sources** with their scores, the statements that were searched for, the model that
@@ -69,8 +77,8 @@ uv run streamlit run app.py
 
 | Command | What it does |
 |---|---|
-| `bible-rag ask "question"` | one answer (the question can also come from stdin); `--task contradiction\|translation\|general` asks for a task |
-| `bible-rag chat` | a conversation; models load once. Commands: `/contradiction <question>`, `/translation <question>`, `/direct <question>`, `/search <text>`, `/k <n>`, `/sources on\|off`, `/quit` |
+| `bible-rag ask "question"` | one answer (the question can also come from stdin); `--task contradiction\|translation\|related\|general` asks for a task |
+| `bible-rag chat` | a conversation; models load once. Commands: `/contradiction <question>`, `/translation <question>`, `/related <question>`, `/direct <question>`, `/search <text>`, `/k <n>`, `/sources on\|off`, `/quit` |
 | `bible-rag search "text"` | retrieval only: the best passages of each translation |
 | `bible-rag versions` | the Bible texts, their licenses and whether they are indexed |
 | `bible-rag models` | which embedders, NLI models and language models are usable here |
@@ -94,14 +102,14 @@ in an expander. Models are loaded once and shared by every browser tab.
 
 The assistant chooses the task, but you can always ask for one:
 
-| | Look for contradictions | Compare translations | Direct search |
-|---|---|---|---|
-| Web chat (buttons under the last answer) | **⚖️ Look for contradictions** | **🌐 Compare translations** | **🔎 Direct search** |
-| `bible-rag ask` | `--task contradiction` | `--task translation` | `--task general` |
-| `bible-rag chat` | `/contradiction <question>` | `/translation <question>` | `/direct <question>` |
+| | Look for contradictions | Compare translations | Related concepts | Direct search |
+|---|---|---|---|---|
+| Web chat (buttons under the last answer) | **⚖️ Look for contradictions** | **🌐 Compare translations** | **🧭 Related concepts** | **🔎 Direct search** |
+| `bible-rag ask` | `--task contradiction` | `--task translation` | `--task related` | `--task general` |
+| `bible-rag chat` | `/contradiction <question>` | `/translation <question>` | `/related <question>` | `/direct <question>` |
 
-The buttons ask the last question again with the chosen task; they show the two tasks that
-weren't used. When the assistant was unsure, the terminal also says how to ask for the other
+The buttons ask the last question again with the chosen task; they show the tasks that weren't
+used. When the assistant was unsure, the terminal also says how to ask for the other
 tasks. References can name verses ("John 3:16", "Juan 3,16", "Psalm 16:10-11") or a whole
 chapter ("Compare the translations of Psalm 23").
 
@@ -268,6 +276,7 @@ point the chain at a model server (`BIBLE_RAG_LLM_CHAIN=openai,extractive` with
 | slow answers or out of memory | `BIBLE_RAG_LLM_CHAIN=extractive`, or a model server (Ollama) |
 | "Another process is building the indexes: waiting" | only one build runs at a time; the second waits for the first |
 | `Address already in use` | `uv run streamlit run app.py --server.port 8502` |
+| after updating the code, answers behave as before | the web chat picks up code changes on the next question; a running `bible-rag chat` or `bible-rag serve` must be restarted |
 
 ## Development
 
@@ -289,10 +298,11 @@ bible_rag/
   cli.py            the `bible-rag` command
   config.py         settings (BIBLE_RAG_* variables)
   rag.py            answering: retrieval, the model chain, grounding
-  agent.py          the assistant: routing and the three pipelines, prompts, answer layout
+  agent.py          the assistant: routing and the four pipelines, prompts, answer layout
   semantic.py       decisions by meaning: routing, topics, subject words, opposition axis
   align.py          parallel passages across translations, key clauses, wording differences
   lexicon.py        topics: modern words -> each translation's words, statements, notes
+  themes.py         biblical themes for subjects the Bible never names, with anchor verses
   grounding.py      reference and quote checking
   index.py          per-text search index (embeddings + BM25), fingerprints, prebuild
   corpus.py         verses, passages, chunking, the RVR1960 PDF parser
@@ -316,6 +326,12 @@ tests/              pytest suite
   a capable language model and the NLI model.
 - The bundled embedder doesn't know Hebrew or Greek, so the originals are shown next to what is
   found rather than searched. An embedder that knows them (e.g. LaBSE) searches them too.
+- Whether the Bible names a subject is judged by meaning and by the Bible's own vocabulary. In
+  the measurements it never said so of a subject the Bible does name, but it misses some
+  borderline subjects (see [Quality](docs/how-it-works.md#quality)); `--task related` (or the
+  button) asks for the related concepts anyway. Its 31 themes (and the principles for deciding
+  on what the Bible doesn't name) cover common modern questions; the language model explains
+  how each one relates, but doesn't add others.
 - Small language models can still misquote. The citation check flags it, and the passages are
   always shown.
 - Answers only weigh the passages shown; they are not a theological judgement.

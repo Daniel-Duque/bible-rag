@@ -168,6 +168,8 @@ def test_detect_language(text, lang):
         ("Ci sono contraddizioni nella Bibbia sul denaro?", "it", "en"),
         ("¿Dónde nació Jesús?", "es", "es"),
         ("Where was Jesus born?", "en", "en"),
+        ("Should I use a cellphone?", "en", "en"),  # not French for its "a"
+        ("Can I use it on Sunday?", "en", "en"),
     ],
 )
 def test_identify_language_for_the_llm(text, lang, ui):
@@ -447,4 +449,15 @@ def test_shipped_prebuild_is_current(monkeypatch):
         f"out of date: {stale}; run `BIBLE_RAG_VERSIONS=all uv run bible-rag prebuild`"
     )
     assert (settings.prebuilt_dir / "strongs.json.gz").exists()
-    assert (settings.prebuilt_dir / "semantics-usem3.npz").exists()
+    shipped = settings.prebuilt_dir / "semantics-usem3.npz"
+    assert shipped.exists()
+
+    class Unavailable:  # every fixed text must come from the shipped file
+        model_name = str(np.load(shipped)["model"])
+
+        def embed(self, texts):
+            raise AssertionError(f"not in {shipped.name} (run `make prebuild`): {texts[:3]}")
+
+    from bible_rag.semantic import Semantics
+
+    Semantics(Unavailable(), shipped=shipped).warm()

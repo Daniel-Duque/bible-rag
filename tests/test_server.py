@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from bible_rag import cli
 from bible_rag.remote import RemoteAnswer, RemoteRAG, RemoteUnavailable, check_url, open_backend
 from bible_rag.server import MAX_QUESTION, ServerConfigError, check_exposure, create_app
+from bible_rag.wire import PROTOCOL
 
 KEY = "k" * 32
 
@@ -49,7 +50,7 @@ def test_auth_and_no_dangerous_routes(app, http):
     wrong = TestClient(app, headers={"Authorization": "Bearer nope"})
     assert wrong.post("/v1/ask", json={"question": "x"}).status_code == 401
     info = http.get("/v1/info").json()
-    assert [v["id"] for v in info["versions"]] == ["kjv", "rv1909"] and info["protocol"] == 3
+    assert [v["id"] for v in info["versions"]] == ["kjv", "rv1909"] and info["protocol"] == PROTOCOL
     for path in ("/v1/ingest", "/ingest", "/v1/models", "/docs", "/openapi.json", "/v1/files"):
         assert http.post(path, json={}).status_code in (404, 405)
         assert http.get(path).status_code in (404, 405)
@@ -110,6 +111,9 @@ def test_ask_streams_plan_tokens_and_answer(http):
     asked = http.post("/v1/ask", json={"question": "In the beginning", "task": "translation"})
     plan = json.loads(next(asked.iter_lines()))["plan"]
     assert plan["intent"] == "translation" and plan["reason"] == "as requested"
+    asked = http.post("/v1/ask", json={"question": "Should I use a cellphone?", "task": "related"})
+    plan = json.loads(next(asked.iter_lines()))["plan"]
+    assert plan["intent"] == "related" and plan["topic_name"] == "cellphone"
     assert answer["text"].startswith("According to") and answer["grounding"]["references"]
     assert "".join(m["text"] for m in lines if m["type"] == "token").strip() == answer["text"]
 
@@ -136,6 +140,9 @@ def test_client_answers_like_the_local_pipeline(settings, http, rag):
     assert [h.passage.citation for h in client.search("my shepherd", 1)][0].endswith("(KJV)")
     asked = client.ask_stream("In the beginning", 1, task="translation")
     assert asked.plan.intent == "translation" and asked.plan.reason == "as requested"
+    "".join(asked)
+    asked = client.ask_stream("Should I use a cellphone?", 1)  # routed by the server
+    assert asked.plan.intent == "related" and asked.plan.topic_name == "cellphone"
     "".join(asked)
     with pytest.raises(ValueError):
         client.ask_stream("x" * (MAX_QUESTION + 1))

@@ -113,7 +113,8 @@ TOPICS = [
         ),
         (
             _c("wine", "wine, wines, new wine, winebibber*", "vino?, vinos, mosto"),
-            _c("strong drink", "strong drink, beer", "sidra, cerveza"),
+            # KJV "Beer", "Beer-sheba" are places: "beer" (WEB) needs a confirming parallel
+            _c("strong drink", "strong drink, beer?", "sidra, cerveza"),
             _c("drunkenness", "drunk?, drunken*, drunkard*", "embriag*, borrach*"),
         ),
         claims=_pair(

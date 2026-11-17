@@ -3,8 +3,10 @@ Reports the retrieval hit rate per question language x translation and, for answ
 a correct passage is cited (verified) and how often something unverifiable is claimed.
 
 `bible-rag eval --agent`: how the assistant routes questions (general / contradiction /
-translation), and, for contradiction questions on six topics, how many of the passages it
-puts on each side are well-known passages for that side (precision of the top k)."""
+translation / related), and, for contradiction questions on six topics, how many of the passages
+it puts on each side are well-known passages for that side (precision of the top k); for
+subjects the Bible never names, how often that is recognised (and never claimed of a subject it
+does name) and whether the related themes chosen fit."""
 
 from __future__ import annotations
 
@@ -12,7 +14,8 @@ import time
 
 from .corpus import BOOKS
 from .grounding import book_index
-from .semantic import CONTRADICTION, GENERAL
+from .semantic import CONTRADICTION, GENERAL, RELATED
+from .themes import THEME_BY_KEY
 
 _IDX = {en: i for i, (_, en, _) in enumerate(BOOKS)}
 
@@ -220,6 +223,22 @@ ROUTING_GOLD = [
     ("Comment les versions traduisent-elles Jean 3:16 ?", "translation"),
     ("Wie übersetzen die Bibelausgaben Psalm 16,10?", "translation"),
     ("Le traduzioni dicono la stessa cosa in Genesi 22:1?", "translation"),
+    # subjects the Bible never names, whatever the question's form (none of them is among
+    # semantic.UNNAMED_SUBJECTS)
+    ("Is it wrong to wear a smartwatch all day?", "related"),
+    ("Can Christians buy Bitcoin?", "related"),
+    ("Does the Bible contradict itself about Bitcoin?", "related"),
+    ("¿Es malo usar Telegram?", "related"),
+    ("É pecado usar o Instagram?", "related"),
+    ("Est-ce un péché d'utiliser Instagram ?", "related"),
+    ("Ist Vaping eine Sünde?", "related"),
+    ("Cosa dice la Bibbia sui robot?", "related"),
+    ("¿Debería usar un celular?", "related"),
+    ("¿Es pecado usar inteligencia artificial?", "related"),
+    ("¿Qué dice la Biblia sobre Argentina?", "related"),  # a country it never names
+    ("What does the Bible say about Germany?", "related"),
+    ("¿Puedo tomar café?", "related"),
+    ("What does the Bible say about India?", "general"),  # Esther 1:1: named
 ]
 
 # question -> lexicon topic (None: a subject outside the lexicon), in six languages
@@ -264,7 +283,114 @@ TOPIC_GOLD = [
     ("Y a-t-il des paradoxes sur la vieillesse ?", None),
     ("Is gluttony condemned or allowed?", None),
     ("Paradoxes about pride and humility?", None),
+    # near a lexicon topic by meaning, but none of its words: not that topic
+    ("hay contradicciones sobre el sexo en la biblia", None),  # not slavery
+    ("Is polygamy allowed or forbidden in the Bible?", None),  # not divorce
+    ("¿Se contradice la Biblia sobre el suicidio?", None),  # not hell
+    ("¿Se contradice la Biblia sobre la salvación de los niños?", None),  # not faith / works
+    ("¿Se contradice la Biblia sobre la muerte?", "hell"),  # the grave, "the dead know nothing"
+    ("¿Se contradice la Biblia sobre la avaricia?", "money"),  # as near, and its own word
+    ("Does the Bible contradict itself about killing?", "war"),
 ]
+
+# Subjects the Bible never names (none among semantic.UNNAMED_SUBJECTS) -> the related themes
+# (themes.py) that fit them. Written before measuring; "Should I take out a mortgage?" was
+# dropped from it: the KJV does say "We have mortgaged our lands" (Nehemiah 5:3).
+RELATED_GOLD = [
+    ("Is it wrong to wear a smartwatch all day?", "time|self_control|skill"),
+    ("¿Es malo usar Telegram?", "communication|speech|self_control|time|falsehood"),
+    ("Is vaping a sin?", "substances|body|self_control"),
+    ("What does the Bible say about robots?", "skill|work|idols"),
+    ("Is Netflix a sin?", "eyes|play|time|self_control"),
+    ("Can Christians buy Bitcoin?", "stewardship|chance|debt"),
+    ("Is it OK to fly drones?", "skill|travel|heavens|weapons"),
+    ("Should I use Tinder to find a wife?", "marriage|purity"),
+    ("Are energy drinks a sin?", "body|substances|self_control"),
+    ("What does the Bible say about antidepressants?", "healing|substances|body"),
+    ("Are e-sports a waste of time?", "play|time|self_control"),
+    ("What does the Bible say about Instagram influencers?", "pride|appearance|speech|eyes"),
+    ("Is genetic engineering playing God?", "skill|life|idols|creation_care|wisdom"),
+    ("Can I accept a blood transfusion?", "healing|body"),
+    ("Est-ce un péché d'utiliser Instagram ?", "pride|communication|eyes|self_control|time"),
+    ("Ist Vaping eine Sünde?", "substances|body|self_control"),
+    ("Cosa dice la Bibbia sui robot?", "skill|work|idols"),
+    ("É pecado usar o TikTok?", "time|self_control|eyes|play|pride"),
+    ("Is it wrong to ride in a self-driving car?", "travel|skill"),
+    ("What does the Bible say about nuclear power plants?", "skill|creation_care"),
+    ("Is fantasy football gambling?", "chance|play"),
+    ("¿Qué dice la Biblia sobre China?", "nations|government"),
+    ("Is Russia mentioned in the Bible?", "nations|government"),
+    ("¿Qué dice la Biblia sobre el comunismo?", "government|stewardship|work"),
+    ("¿Es pecado donar órganos?", "healing|body|life"),
+]
+# Subjects the Bible does name, often in other words, and questions without a subject: never
+# "not named in the Bible" (with the direct and contradiction questions of ROUTING_GOLD)
+NAMED_GOLD = [
+    "What does the Bible say about horses?",
+    "Is jewelry allowed?",
+    "What does the Bible say about astrology?",
+    "What does the Bible say about taxes?",
+    "What does the Bible say about fishing?",
+    "Who was king David?",
+    "What does the Bible say about tattoos?",
+    "¿Qué dice la Biblia sobre el ayuno?",
+    "What does the Bible say about sleep?",
+    "Que dit la Bible sur le pardon ?",
+    "Was sagt die Bibel über Geld?",
+    "O que a Bíblia diz sobre o casamento?",
+    "Cosa dice la Bibbia sulla preghiera?",
+    "Are there contradictions in the Bible?",
+    "¿Hay contradicciones en la Biblia?",
+    "Is it allowed?",
+    "Why?",
+    "Is Italy in the Bible?",  # Acts 27:1
+    "¿Aparece España en la Biblia?",  # Romanos 15:24
+    "¿Qué dice la Biblia sobre Asiria?",
+    "What does the Bible say about anxiety?",  # not a KJV word; Matthew 6:25-34
+    "¿Existen errores en la Biblia?",
+]
+
+# Direct questions on whether something is a sin, which must find the passages on that sin
+# rather than on sin in general: (English, Spanish, chapters that answer them). Written before
+# measuring.
+# fmt: off
+SIN_GOLD = [
+    ("Is it a sin to get drunk?", "¿Es pecado emborracharse?",
+     "Ephesians 5|Proverbs 20|Proverbs 23|Galatians 5|1 Corinthians 6|1 Corinthians 5|Isaiah 5|"
+     "Isaiah 28|Romans 13|1 Thessalonians 5|1 Peter 4|Luke 21|Habakkuk 2|Genesis 9|Joel 1|"
+     "Hosea 4|Proverbs 31|Titus 2|1 Timothy 3|Deuteronomy 21"),
+    ("Is it a sin to swear an oath?", "¿Es pecado jurar?",
+     "Matthew 5|James 5|Leviticus 19|Leviticus 5|Numbers 30|Deuteronomy 23|Ecclesiastes 5|"
+     "Deuteronomy 6|Deuteronomy 10|Hebrews 6|Matthew 23|Matthew 26|Exodus 20|Zechariah 8"),
+    ("Is it a sin to lie?", "¿Es pecado mentir?",
+     "Exodus 20|Leviticus 19|Proverbs 6|Proverbs 12|Proverbs 19|Proverbs 14|Colossians 3|"
+     "Ephesians 4|Revelation 21|Revelation 22|John 8|Psalms 101|Acts 5|Deuteronomy 5|"
+     "Zechariah 8|Proverbs 26"),
+    ("Is it a sin to be angry?", "¿Está mal enfadarse?",
+     "Ephesians 4|Matthew 5|James 1|Proverbs 14|Proverbs 15|Proverbs 16|Proverbs 19|"
+     "Proverbs 29|Proverbs 22|Psalms 37|Ecclesiastes 7|Colossians 3|Galatians 5"),
+    ("Is stealing wrong?", "¿Está mal robar?",
+     "Exodus 20|Ephesians 4|Leviticus 19|Deuteronomy 5|Proverbs 30|Romans 13|1 Corinthians 6|"
+     "Matthew 19|Exodus 22|Zechariah 5|Proverbs 29|Romans 2"),
+    ("Is adultery a sin?", "¿Es pecado el adulterio?",
+     "Exodus 20|Matthew 5|Hebrews 13|Proverbs 6|Proverbs 5|Leviticus 20|1 Corinthians 6|John 8|"
+     "Deuteronomy 5|Matthew 19|Galatians 5|Mark 10|Romans 13|James 2"),
+    ("Is laziness a sin?", "¿Es malo ser perezoso?",
+     "Proverbs 6|Proverbs 10|Proverbs 12|Proverbs 13|Proverbs 19|Proverbs 20|Proverbs 21|"
+     "Proverbs 24|Proverbs 26|2 Thessalonians 3|Ecclesiastes 10|Matthew 25|Proverbs 15|"
+     "Proverbs 18"),
+    ("Is envy a sin?", "¿Es pecado la envidia?",
+     "Proverbs 14|Proverbs 23|Proverbs 24|Proverbs 27|James 3|James 4|Galatians 5|"
+     "1 Corinthians 13|1 Corinthians 3|Psalms 37|Psalms 73|Exodus 20|Romans 1|Romans 13|Titus 3|"
+     "1 Peter 2|Job 5"),
+    ("Is gluttony a sin?", "¿Es pecado la glotonería?",
+     "Proverbs 23|Proverbs 28|Deuteronomy 21|Philippians 3|Titus 1|Matthew 11|Luke 7|Luke 21|"
+     "1 Corinthians 6|1 Corinthians 10|Proverbs 25"),
+    ("Is revenge wrong?", "¿Está mal vengarse?",
+     "Romans 12|Leviticus 19|Deuteronomy 32|Proverbs 20|Proverbs 24|Matthew 5|"
+     "1 Thessalonians 5|1 Peter 3|Hebrews 10|Proverbs 25"),
+]
+# fmt: on
 
 # question -> well-known chapters for the first and for the second claim (KJV book names)
 # fmt: off
@@ -319,14 +445,13 @@ def evaluate_agent(rag, k: int | None = None, progress=None) -> dict:
 
     planner = Planner(rag)
     say = progress or (lambda line: None)
-    sem = rag.semantics
     routing, topics, sides = [], [], []
     for question, expected in ROUTING_GOLD:
         got = planner.route(question, rag.embedder.embed([question])[0]).intent
         routing.append({"question": question, "expected": expected, "got": got})
         say(f"route  {'✓' if got == expected else '✗'} {got:13s} {question}")
     for question, expected in TOPIC_GOLD:
-        topic, score = sem.topic(sem.subject(rag.embedder.embed([question])[0]))
+        topic = planner.topic_of(question, rag.embedder.embed([question])[0])
         got = topic.key if topic else None
         topics.append({"question": question, "expected": expected, "got": got})
         say(f"topic  {'✓' if got == expected else '✗'} {got or '(own words)':13s} {question}")
@@ -350,6 +475,17 @@ def evaluate_agent(rag, k: int | None = None, progress=None) -> dict:
                 how = "lexicon" if use_lexicon else "meaning"
                 say(f"side   {precision:.2f} [{how}] {question[:38]:38s} {section.title}: {found}")
 
+    planner.use_lexicon = True
+    related = evaluate_related(planner, say)
+    sins = []  # the direct search on "is it a sin to…?": passages on that sin, in the top k
+    for en, es, chapters in SIN_GOLD:
+        wanted = set(chapters.split("|"))
+        for language, question in (("en", en), ("es", es)):
+            plan = run_pipeline(planner, GENERAL, question, language, k)
+            found = [f"{BOOKS[row.book][1]} {row.chapter}" for row in plan.sections[0].rows]
+            sins.append({"question": question, "found": found, "hit": bool(wanted & set(found))})
+            say(f"sin    {'✓' if sins[-1]['hit'] else '✗'} {question}: {found}")
+
     def rate(rows):
         return round(sum(r["expected"] == r["got"] for r in rows) / len(rows), 3)
 
@@ -362,5 +498,58 @@ def evaluate_agent(rag, k: int | None = None, progress=None) -> dict:
         "topic_accuracy": rate(topics),
         "contradiction_side_precision": precision(True),
         "contradiction_side_precision_meaning_only": precision(False),
+        "sin_question_hit": round(sum(s["hit"] for s in sins) / len(sins), 3),
+        **related["summary"],
     }
-    return {"summary": summary, "routing": routing, "topics": topics, "contradictions": sides}
+    return {
+        "summary": summary,
+        "routing": routing,
+        "topics": topics,
+        "contradictions": sides,
+        "related": related["questions"],
+        "sins": sins,
+    }
+
+
+def evaluate_related(planner, say=lambda line: None) -> dict:
+    """Subjects the Bible never names: how many are routed to the related themes, how many
+    named subjects (and subject-less questions) are wrongly said to be absent, and whether
+    the themes chosen fit (at least one of them: hit; the share of them: precision)."""
+    embed = planner.embedder.embed
+    rows, named = [], []
+    for question, fitting in RELATED_GOLD:
+        qvec = embed([question])[0]
+        route = planner.route(question, qvec).intent
+        plan = planner.related(question, "en", 1, list(planner.rag.indexes), qvec)
+        chosen = [s.key for s in plan.sections if not THEME_BY_KEY[s.key].frame]
+        good = set(fitting.split("|"))
+        rows.append(
+            {
+                "question": question,
+                "routed": route,
+                "score": round(plan.absence.score, 3),
+                "themes": chosen,
+                "hit": any(t in good for t in chosen),
+                "precision": round(sum(t in good for t in chosen) / max(len(chosen), 1), 3),
+            }
+        )
+        mark = "✓" if route == RELATED else "✗"
+        say(f"related {mark} {plan.absence.score:+.2f} {chosen} {question}")
+    questions = NAMED_GOLD + [q for q, intent in ROUTING_GOLD if intent in (GENERAL, CONTRADICTION)]
+    for question in questions:
+        absent = planner.absence(question, embed([question])[0]).absent
+        named.append({"question": question, "absent": absent})
+        if absent:
+            say(f"named   ✗ said to be absent: {question}")
+
+    def share(flags):
+        flags = list(flags)
+        return round(sum(flags) / len(flags), 3)
+
+    summary = {
+        "related_recognised": share(r["routed"] == RELATED for r in rows),
+        "named_wrongly_absent": share(n["absent"] for n in named),
+        "related_theme_hit": share(r["hit"] for r in rows),
+        "related_theme_precision": share(r["precision"] for r in rows),
+    }
+    return {"summary": summary, "questions": rows + named}

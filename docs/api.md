@@ -54,14 +54,15 @@ All bodies are JSON. Every endpoint except `/v1/health` needs the header
 
 | Endpoint | Body | Reply |
 |---|---|---|
-| `GET /v1/health` | | `{"status": "ok", "protocol": 3}` |
+| `GET /v1/health` | | `{"status": "ok", "protocol": 4}` |
 | `GET /v1/info` | | the texts served, the embedder, the LLM, the NLI model, `top_k` |
 | `POST /v1/search` | `{"question": "...", "k": 3, "versions": ["kjv"]}` | `{"sources": [passage, ...]}` |
 | `POST /v1/ask` | `{"question": "...", "k": 3, "versions": ["kjv", "rv1909"], "task": "translation"}` | the answer, streamed as JSON lines |
 
 `k`, `versions` and `task` are optional. Without `task` the assistant chooses the pipeline, as
-in the terminal and the web chat; `"general"`, `"contradiction"` or `"translation"` asks for
-one. `/v1/ask` streams one JSON object per line:
+in the terminal and the web chat; `"general"`, `"contradiction"`, `"translation"` or `"related"`
+(the concepts related to a subject the Bible never names) asks for one. `/v1/ask` streams one
+JSON object per line:
 
 ```
 {"type": "plan", "plan": {"intent": "contradiction", "topic_name": "...", "reason": "...", "queries": [...], ...}}

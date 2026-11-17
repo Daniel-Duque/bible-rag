@@ -10,12 +10,19 @@ contradiction  "Are there any paradoxes in the Bible about alcohol?"
                translations.
 translation    "How do the translations render Psalm 16:10?" / "Do the versions differ on hell?"
                the same passages side by side with the places where their wording differs.
+related        "Should I use a cellphone?"
+               a subject the Bible never names: the answer says so (and which texts were
+               checked for its words), then shows the biblical themes related to it
+               (communication, self-control...), each with how it relates, so that applying
+               them stays visibly an inference.
 
 Decisions are made by meaning (semantic.py), not keywords: the question is routed by its
-closeness to example questions of each kind, its topic by closeness to the lexicon's topics,
-and a passage's side by where it falls between the two statements and on the opposition
-axis; an NLI model, if available, checks the opposition directly. When a capable LLM is loaded
-it settles close routing calls and writes the two statements for topics outside the lexicon.
+closeness to example questions of each kind (or, for a subject closer to the things the Bible
+never names than to those it does, to the related themes), its topic by closeness to the
+lexicon's topics, and a passage's side by where it falls between the two statements and on
+the opposition axis; an NLI model, if available, checks the opposition directly. When a
+capable LLM is loaded it settles close routing calls and close calls on whether the Bible names
+a subject, and writes the two statements for topics outside the lexicon.
 Without any LLM everything still works; the LLM (if any) writes the synthesis (rag.Answer).
 """
 
@@ -43,7 +50,7 @@ from .align import (
     word_changes,
 )
 from .corpus import embeddable
-from .grounding import chapters, references, without_references
+from .grounding import book_index, chapters, references, without_references
 from .index import Hit, tokens
 from .lexicon import (
     GENERIC_CLAIMS,
@@ -54,8 +61,9 @@ from .lexicon import (
     compile_terms,
     fold,
 )
-from .semantic import CONTRADICTION, GENERAL, INTENTS, TRANSLATION, unit
+from .semantic import CONTRADICTION, GENERAL, INTENTS, RELATED, ROUTES, TRANSLATION, unit
 from .sources import VERSIONS
+from .themes import Theme
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +81,36 @@ class Route:
 class Section:
     title: str
     rows: list[Row]
+    note: str = ""  # shown under the title (e.g. how a related theme relates to the subject)
+    key: str = ""  # what the section is (related: the theme's key)
+
+
+@dataclass
+class Absence:
+    """Whether the Bible names what a question is about, and the evidence."""
+
+    subject: str  # as the user wrote it ("cellphone"); "" when no subject word was found
+    words: list[str]
+    score: float  # > 0: not named (see Planner.absence)
+    absent: bool
+    by: str = "meaning"  # who decided: "meaning", or the LLM that settled a close call
+    checked: list[str] = field(default_factory=list)  # texts searched for the words
+    found: dict = field(default_factory=dict)  # text label -> (passages, first reference)
+    views: tuple = ()  # the subject's vector and its words' (semantic.theme_scores)
+    nearest: str = ""  # the Bible's closest word to the least covered subject word
+
+    @property
+    def vector(self) -> np.ndarray:
+        """The subject with its words, for ranking passages."""
+        return unit(np.sum(self.views, axis=0))
+
+    @property
+    def reason(self) -> str:
+        how = f"{self.by} decided" if self.by != "meaning" else f"by meaning, {self.score:+.2f}"
+        if self.nearest:
+            how += f"; nearest Bible word “{self.nearest}”"
+        side = "not named in the Bible" if self.absent else "named in the Bible"
+        return f"{side} ({how})"
 
 
 @dataclass
@@ -92,6 +130,8 @@ class Plan:
     extra: list[Hit] = field(default_factory=list)  # passages the notes cite
     checks: list[str] = field(default_factory=list)  # how the findings were checked
     reply_language: str = ""  # the question's language, for the LLM (default: `language`)
+    absence: Absence | None = None  # related: whether the Bible names the subject
+    themes: list[str] = field(default_factory=list)  # related: the themes, as named in the lead
 
     @property
     def sources(self) -> list[Hit]:
@@ -105,7 +145,9 @@ class Plan:
 
     @property
     def topic_name(self) -> str:
-        return self.topic.name[self.language] if self.topic else ""
+        if self.topic:
+            return self.topic.name[self.language]
+        return self.absence.subject if self.absence else ""
 
     # ----------------------------------------------------------------- LLM messages
     def messages(self, compact: bool = False) -> list[dict]:
@@ -124,6 +166,8 @@ class Plan:
         blocks, n = [], 0
         for section in self.sections:
             lines = [f"## {section.title}"] if len(self.sections) > 1 else []
+            if section.note:  # under its heading
+                lines = [f"{lines[0]}\n({section.note})" if lines else f"({section.note})"]
             for row in section.rows:
                 for h in row.hits.values():
                     n += 1
@@ -135,7 +179,11 @@ class Plan:
         notes = [*self.notes, *(note for s in self.sections for r in s.rows for note in r.notes)]
         if notes:
             context += "\n\nNotes on the translations:\n" + "\n".join(f"- {n}" for n in notes)
-        task = TASKS[self.intent].format(lang=lang, topic=self.topic_name)
+        if self.intent == RELATED:  # what was checked: the model must not claim otherwise
+            found = [self.intro().split(". ")[0].rstrip(".") + ".", *self.remarks]
+            context += "\n\nWhat the search found:\n" + "\n".join(f"- {f}" for f in found)
+        topic = self.topic_name or _TEXT["en"]["your_subject"]
+        task = TASKS[self.intent].format(lang=lang, topic=topic)
         user = f"Context passages:\n{context}\n\nQuestion: {self.question.strip()}\n\n{task}"
         system = PROMPTS[self.intent].format(versions=labels)
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -160,6 +208,15 @@ class Plan:
         if self.intent == TRANSLATION:
             differs = any(r.notes for s in self.sections for r in s.rows)
             return t["translation_differs" if differs else "translation_same"]
+        if self.intent == RELATED and self.absence is not None:
+            a = self.absence
+            subject = t["quote"].format(a.subject) if a.subject else t["your_subject"]
+            if not a.absent:
+                key = "related_named"
+            else:
+                key = "related_as_such" if a.found else "related_absent"
+            themes = _join(self.themes, t["and"]) if self.themes else t["no_themes"]
+            return _upper_first(t[key].format(subject=subject, themes=themes))
         return t["general"]
 
     def render(self, notes: bool = True) -> str:
@@ -169,6 +226,8 @@ class Plan:
         out = [f"_{remark}_\n" for remark in self.remarks] if notes else []
         for section in self.sections:
             out.append(f"**{section.title}**")
+            if section.note and notes:
+                out.append(f"_{section.note}_")
             if not section.rows:
                 out.append(f"_{t['none_found']}_")
             for i, row in enumerate(section.rows, 1):
@@ -204,6 +263,9 @@ JSON only, no other text:
  "for_en": "<one sentence affirming or approving it, in biblical style>",
  "against_en": "<one sentence saying the opposite>",
  "for_es": "<for_en in Spanish>", "against_es": "<against_en in Spanish>"}"""
+ABSENCE_PROMPT = """Does the Bible mention the subject of the user's question by name, or \
+speak of it directly (in any words)? Things that did not exist in biblical times are not \
+mentioned. Reply with one word: yes or no."""
 PROMPTS = {
     GENERAL: """You are a careful Bible study assistant. Answer using ONLY the passages in \
 the context, which come from these translations: {versions}.
@@ -234,6 +296,17 @@ and “sepulcro” (Salmos 16:10, RV1909).
 number) behind a translation's word: say which rendering is closer to it.
 - If the translations agree, say so. Use ONLY the passages and notes given; do not invent \
 verses or claims about the original languages.""",
+    RELATED: """You are a careful Bible study assistant. The user asks about something \
+the Bible may not mention by name (see "What the search found"). The context has passages on \
+related biblical themes, grouped under headings that say how each theme relates to the \
+subject; each passage is given in several translations: {versions}.
+- Start by saying plainly whether the Bible mentions the subject, as the search found.
+- Then, for each group, explain in one or two sentences how the theme relates to the subject \
+and what principle its passages give. Cite passages exactly as given, e.g. (2 John 1:12, KJV).
+- Make clear that applying these passages to the subject is an inference, not something the \
+text says. If a group does not really apply, say so.
+- Use ONLY the passages given. Do not invent verses and do not claim that the Bible speaks of \
+the subject. Be concise, neutral and respectful; do not take a denominational side.""",
 }
 TASKS = {
     GENERAL: "Answer in {lang}, citing the passages you rely on.",
@@ -241,6 +314,8 @@ TASKS = {
     "their context reconcile them? Cite passages from both groups.",
     TRANSLATION: "Answer in {lang}: how do the translations differ here, and does it change "
     "the meaning? Cite the passages.",
+    RELATED: "Answer in {lang}: what does the Bible say, and not say, about {topic}? Explain how "
+    "each group of passages relates to it, citing them.",
 }
 
 _TEXT = {
@@ -277,6 +352,27 @@ _TEXT = {
         "changes": "{a} → {b}",
         "style": "plus {n} minor or archaic-to-modern changes (“thou” → “you”…)",
         "very_different": "{a} and {b} word this very differently",
+        "related_absent": "the Bible does not mention {subject}. It does speak of related "
+        "things: {themes}. The passages below are about those, not about {subject}: applying "
+        "them to it is an inference.",
+        "related_as_such": "the Bible does not speak of {subject} as such (for where its "
+        "words occur, see the note below). It does speak of related things: {themes}. The "
+        "passages below are about those, not about {subject}: applying them to it is an "
+        "inference.",
+        "related_named": "the Bible does speak of {subject} directly: a direct search shows "
+        "those passages. These related themes widen the picture: {themes}.",
+        "your_subject": "what you ask about",
+        "quote": "“{}”",
+        "no_themes": "no related theme was found",
+        "and": "and",
+        "related_link": "How this relates to “{subject}”: {link}.",
+        "related_link_frame": "How this relates: {link}.",
+        "not_in_texts": "“{words}” does not occur in {versions}.",
+        "in_texts": "“{words}” occurs in {found}: check whether it means the same there.",
+        "passages": "{n} passages, e.g. {example}",
+        "passage": "1 passage: {example}",
+        "not_checked": "No loaded text is in the question's language: whether the Bible names "
+        "it was judged by meaning only.",
     },
     "es": {
         "general": "Pasajes que mejor responden a su pregunta:",
@@ -310,12 +406,39 @@ _TEXT = {
         "changes": "{a} → {b}",
         "style": "y {n} cambios menores o de estilo arcaico a moderno («thou» → «you»…)",
         "very_different": "{a} y {b} lo redactan de forma muy distinta",
+        "related_absent": "la Biblia no menciona {subject}. Sí habla de cosas relacionadas: "
+        "{themes}. Los pasajes de abajo tratan de eso, no de {subject}: aplicarlos es una "
+        "inferencia.",
+        "related_as_such": "la Biblia no habla de {subject} como tal (dónde aparecen sus "
+        "palabras, vea la nota abajo). Sí habla de cosas relacionadas: {themes}. Los pasajes "
+        "de abajo tratan de eso, no de {subject}: aplicarlos es una inferencia.",
+        "related_named": "la Biblia sí habla de {subject} directamente: una búsqueda directa "
+        "muestra esos pasajes. Estos temas relacionados amplían el panorama: {themes}.",
+        "your_subject": "lo que usted pregunta",
+        "quote": "«{}»",
+        "no_themes": "no se encontró ningún tema relacionado",
+        "and": "y",
+        "related_link": "Relación con «{subject}»: {link}.",
+        "related_link_frame": "Relación: {link}.",
+        "not_in_texts": "«{words}» no aparece en {versions}.",
+        "in_texts": "«{words}» aparece en {found}: compruebe si significa lo mismo allí.",
+        "passages": "{n} pasajes, p. ej. {example}",
+        "passage": "1 pasaje: {example}",
+        "not_checked": "Ningún texto cargado está en el idioma de la pregunta: si la Biblia lo "
+        "nombra se juzgó sólo por el sentido.",
     },
 }
 
 
 def _upper_first(text: str) -> str:
     return text[:1].upper() + text[1:]
+
+
+def _join(items: list[str], conjunction: str) -> str:
+    """'a', 'a and b', 'a, b and c'."""
+    if len(items) < 2:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} {conjunction} {items[-1]}"
 
 
 # --------------------------------------------------------------------------- pipelines
@@ -338,9 +461,23 @@ class Planner:
     # topics outside the lexicon: words per translation found by meaning (see _expand)
     expand_terms, expand_span, expand_context = 6, 0.15, 2.0
     use_lexicon = True  # False: every topic is handled by meaning only (for evaluation)
+    # subjects the Bible doesn't name (see `absence`): score > absent_margin, a close call
+    # (within absent_band) settled by a capable LLM; the vocabulary's part of the score is
+    # vocabulary_weight x how far the least covered subject word is from vocabulary_match
+    absent_margin, absent_band = 0.0, 0.05
+    vocabulary_weight, vocabulary_match = 0.3, 0.87
+    # related themes: at most related_themes sections (a frame included), themes scoring
+    # within theme_span of the best; the frame when the question asks whether something is
+    # right (frame_threshold); passages ranked by closeness to the theme + subject_weight x
+    # closeness to the subject, anchor_bonus for a theme's anchor passages
+    related_themes, theme_span, frame_threshold = 3, 0.12, 0.42
+    subject_weight, anchor_bonus = 0.5, 0.2
 
     def __init__(self, rag):
         self.rag = rag
+        # per question, computed once: what it is about (subject, words), whether it is named
+        self._abouts: dict[str, tuple[np.ndarray, list[str]]] = {}
+        self._absences: dict[str, Absence] = {}
 
     @property
     def embedder(self):
@@ -359,7 +496,7 @@ class Planner:
         task: str | None = None,
     ) -> Plan:
         """Run the question's pipeline: the one `task` asks for (general, contradiction,
-        translation), else the one routing chooses."""
+        translation, related), else the one routing chooses."""
         if task not in (None, *INTENTS):
             raise ValueError(f"Unknown task {task!r}; choose from {', '.join(INTENTS)}")
         if not question.strip():
@@ -381,6 +518,7 @@ class Planner:
             GENERAL: self.general,
             CONTRADICTION: self.contradiction,
             TRANSLATION: self.translation,
+            RELATED: self.related,
         }[intent]
 
     # ---------------------------------------------------------------------- routing
@@ -388,6 +526,13 @@ class Planner:
         """By meaning: the kind of question whose examples are closest (semantic.py). A close
         call goes to the LLM when a capable one is loaded."""
         intent, margin, scores = self.semantics.route(qvec)
+        # a subject the Bible never names: its related themes, however it is asked ("Are
+        # there contradictions about video games?" has no passages for or against). Not for
+        # a comparison of translations, nor a question about the verses it cites.
+        if intent != TRANSLATION and not references(question):
+            absence = self.absence(question, qvec)
+            if absence.absent:
+                return Route(RELATED, absence.reason, scores)
         ranked = sorted(scores, key=scores.get, reverse=True)
         reason = (
             f"closest to {intent} questions ({scores[intent]:.2f} vs {ranked[1]} "
@@ -425,17 +570,62 @@ class Planner:
 
     def _llm_intent(self, llm, question: str) -> str | None:
         reply = self._ask(llm, ROUTER_PROMPT, question, 8).lower()
-        found = [i for i in INTENTS if i in reply]
+        found = [i for i in ROUTES if i in reply]
         return found[0] if len(found) == 1 else None
 
+    def _about(self, question: str, qvec: np.ndarray) -> tuple[np.ndarray, list[str]]:
+        """What the question is about: its subject (the question minus its task) and its
+        subject words, by meaning (semantic.py); computed once per question."""
+        if question not in self._abouts:
+            sem = self.semantics
+            words = sem.subject_words(without_references(question), qvec)
+            self._abouts[question] = (sem.subject(qvec), words)
+        return self._abouts[question]
+
     def _subject(self, question: str, qvec: np.ndarray):
-        """(lexicon topic or None, subject vector, subject words): what the question is about,
-        by meaning (semantic.py)."""
+        """(lexicon topic or None, subject vector, subject words when there is no topic)."""
+        subject, words = self._about(question, qvec)
+        topic = self.topic_of(question, qvec) if self.use_lexicon else None
+        return topic, subject, [] if topic else words
+
+    def topic_of(self, question: str, qvec: np.ndarray) -> Topic | None:
+        """The lexicon topic a question is about (semantic.topic), kept when the question
+        surely is about it (closer than any question about another subject comes) or when its
+        subject words are the topic's own words: "¿Hay contradicciones sobre el sexo?" comes
+        near slavery by meaning, but "sexo" is none of its words (esclavo, siervo...), while
+        "¿Se contradice la Biblia sobre la avaricia?" is as near to money and says *avaricia*."""
         sem = self.semantics
-        subject = sem.subject(qvec)
-        topic = sem.topic(subject)[0] if self.use_lexicon else None
-        words = [] if topic else sem.subject_words(without_references(question), qvec)
-        return topic, subject, words
+        subject, words = self._about(question, qvec)
+        topic, closeness = sem.topic(subject)
+        if topic is None or closeness >= sem.topic_certainty or not words:
+            return topic
+        return topic if self._topic_match(topic, words) >= self.vocabulary_match else None
+
+    def _topic_match(self, topic: Topic, words: list[str]) -> float:
+        """How close the subject words come to the topic's words in the Bible's vocabulary
+        (its terms; "esclav*" -> esclavo, esclavos...): 1 for a subject word that shares its
+        stem with one of them, else the closest by meaning (any language)."""
+        keys = [k for w in words for k in tokens(fold(w)) if len(k) > 2]  # "war" counts
+        stems = [fold(t.rstrip("*?")) for t in topic.terms("en") + topic.terms("es")]
+        own, vectors = [], []
+        for ws, vs in self._vocabularies():
+            ids = [i for i, w in enumerate(ws) if any(w.startswith(s) for s in stems)]
+            own += [ws[i] for i in ids]
+            vectors += [vs[i] for i in ids]
+        if not keys or not own:
+            return 0.0
+        if any(k.startswith(w) or w.startswith(k) for k in keys for w in own):
+            return 1.0
+        return float((self.embedder.embed(keys) @ np.array(vectors).T).max())
+
+    def _vocabularies(self) -> list[tuple[list[str], np.ndarray]]:
+        """The Bible's vocabulary: the words of the first translation of each language,
+        embedded with its index."""
+        found = [
+            self.rag.indexes[v].vocabulary(self.embedder)
+            for v in self.primary(list(self.rag.indexes))
+        ]
+        return [(ws, vs) for ws, vs in found if ws]
 
     # ---------------------------------------------------------------------- helpers
     def _language(self, v: str) -> str:
@@ -572,12 +762,13 @@ class Planner:
     def general(
         self, question, language, k, versions, qvec, topic=None, remarks=(), concept_notes=True
     ) -> Plan:
-        """Direct semantic search, then every translation's parallel of the best passages."""
-        hits = self.rag.search(question, k, self.searchable(versions))
+        """Direct search, then every translation's parallel of the best passages."""
+        topic = topic or self.topic_of(question, qvec)
+        searched = self.searchable(versions)
+        hits = self.rag.search(question, k, searched, self._keywords(question, qvec, topic))
         label_to_id = {VERSIONS[v].label: v for v in versions}
         rows = group([(label_to_id[h.passage.version], h) for h in hits])[:k]
         self._complete(rows, versions, qvec)
-        topic = topic or self.semantics.topic(self.semantics.subject(qvec))[0]
         if concept_notes:
             self._concept_notes(rows, topic, language)
             self._meaning_notes(rows, language)
@@ -593,6 +784,35 @@ class Planner:
             queries=[question],
             remarks=list(remarks),
         )
+
+    def _keywords(self, question: str, qvec: np.ndarray, topic: Topic | None) -> str:
+        """The texts' own words for what is asked, added to the keyword search, so that
+        "¿Es pecado emborracharse?" finds the passages on drunkenness rather than every
+        passage on sin: for a lexicon topic, the terms of its concept closest to the subject
+        (drunkenness, not wine in general), prefixes expanded to each text's words ("embriag*"
+        -> embriaguez, embriagarse...; homographs such as "vino" = came left out); else the
+        Bible's word for each subject word it words otherwise ("glotonería" -> glotón)."""
+        subject, words = self._about(question, qvec)
+        if topic is None:
+            found = self._bible_words(words)
+            near = (
+                b for w, similarity, b in found if b != w and similarity >= self.vocabulary_match
+            )
+            return " ".join(dict.fromkeys(near))
+        texts = [
+            f"{c.gloss}: {', '.join(t.rstrip('*?') for t in c.en + c.es)}" for c in topic.concepts
+        ]
+        concept = topic.concepts[int(np.argmax(self.embedder.embed(texts) @ subject))]
+        terms, versions = [], self.searchable(list(self.rag.indexes))
+        for term in (t for t in concept.en + concept.es if not t.endswith("?")):
+            if not term.endswith("*"):
+                terms.append(term)
+                continue
+            for v in versions:
+                terms += [
+                    w for w in self.rag.indexes[v].bm25.terms if w.startswith(fold(term[:-1]))
+                ]
+        return " ".join(dict.fromkeys(terms))
 
     # ---------------------------------------------------------------- contradiction
     def contradiction(self, question, language, k, versions, qvec) -> Plan:
@@ -1028,3 +1248,209 @@ class Planner:
                     shown += ("; " if shown else "") + t["style"].format(n=style)
                 if shown:
                     row.notes.append(f"{la} → {lb}: {shown}")
+
+    # ---------------------------------------------------------------------- related
+    def absence(self, question: str, qvec: np.ndarray) -> Absence:
+        """Whether the Bible names what the question is about, from two kinds of meaning:
+        - is the subject (and its words) closer to things the Bible never names than to
+          things it does (semantic.absence)?
+        - how close is the Bible's own vocabulary to it: every subject word needs a near
+          equivalent in a translation ("Egypt", "España", "astrologers" have one; "Argentina",
+          "celular", "ChatGPT" don't; `_coverage`; a subject that surely is a lexicon
+          topic has its words: "emborracharse" is the alcohol topic's *embriagarse*)?
+        The two add up to one score, absent above `absent_margin`; without subject words
+        ("¿Está bien jugar videojuegos?") only the meaning speaks, and it must be clear (beyond
+        `absent_band`: "Are there contradictions in the Bible?" has no subject to lack). A
+        close call goes to a capable LLM if one is loaded. Where the words occur in the texts
+        is gathered as evidence for the user, not to decide: KJV "smoking" is a furnace."""
+        if question in self._absences:
+            return self._absences[question]
+        sem = self.semantics
+        subject, words = self._about(question, qvec)
+        wvec = self.embedder.embed([" ".join(words)])[0] if words else None
+        views = (subject,) if wvec is None else (subject, wvec)
+        score = float(np.mean(sem.absence_views(subject, wvec)))
+        coverage, nearest = self._coverage(words)
+        if coverage is not None:
+            topic, closeness = sem.topic(subject)
+            if topic is not None and closeness >= sem.topic_certainty:
+                coverage, nearest = 1.0, ""  # surely a lexicon topic: its words are the texts'
+            score += self.vocabulary_weight * (self.vocabulary_match - coverage)
+        threshold = self.absent_margin + (0.0 if words else self.absent_band)
+        absent, by = score > threshold, "meaning"
+        if abs(score - self.absent_margin) < self.absent_band and (llm := self._llm()):
+            decided = self._llm_absent(llm, question)
+            if decided is not None:
+                absent, by = decided, llm.label
+        checked, found = self._occurrences(question, words)
+        asked = {w.lower(): w for w in re.findall(r"\w+", question)}  # as the user wrote it
+        shown = " ".join(asked.get(w, w) for w in words)
+        result = Absence(shown, words, score, absent, by, checked, found, views, nearest)
+        self._absences[question] = result
+        return result
+
+    def _bible_words(self, words: list[str]) -> list[tuple[str, float, str]]:
+        """Each subject word (accents folded, stop words out) with the Bible's own word for
+        it: (word, 1, word) if a translation has it (also in singular or plural), else its
+        nearest word by meaning in the first translation of each language (their vocabularies
+        are embedded with the index), as (word, similarity, nearest)."""
+        keys = list(dict.fromkeys(t for w in words for t in tokens(fold(w))))
+        vocabularies = self._vocabularies()
+        if not keys or not vocabularies:
+            return []
+        known = {w for ws, _ in vocabularies for w in ws}
+        found = []
+        for key, vec in zip(keys, self.embedder.embed(keys), strict=True):
+            forms = {key, f"{key}s", f"{key}es"}  # and its singular: -s, -es removed
+            forms |= {key[: -len(end)] for end in ("s", "es") if key.endswith(end)}
+            if known & {f for f in forms if len(f) > 2}:
+                found.append((key, 1.0, key))
+                continue
+            best = (-1.0, "")
+            for ws, vs in vocabularies:
+                sims = vs @ vec
+                i = int(np.argmax(sims))
+                best = max(best, (float(sims[i]), ws[i]))
+            found.append((key, *best))
+        return found
+
+    def _coverage(self, words: list[str]) -> tuple[float | None, str]:
+        """How well the Bible's vocabulary covers the subject words: the least covered one,
+        with its nearest Bible word. (None, "") without subject words."""
+        found = self._bible_words(words)
+        if not found:
+            return None, ""
+        _, similarity, nearest = min(found, key=lambda f: f[1])
+        return similarity, "" if similarity >= 1.0 else nearest
+
+    def _llm_absent(self, llm, question: str) -> bool | None:
+        """The LLM's call on a close one: True when the Bible doesn't mention the subject."""
+        reply = self._ask(llm, ABSENCE_PROMPT, question, 4).strip().lower()
+        yes, no = reply.startswith(("yes", "sí", "si")), reply.startswith("no")
+        return no if yes != no else None
+
+    def _occurrences(self, question: str, words: list[str]) -> tuple[list[str], dict]:
+        """The loaded translations in the question's language (their labels) and, for those
+        containing the subject's words as a phrase (the last word also as singular or
+        plural), how many passages and the first one: {label: (passages, reference)}."""
+        from .rag import identify_language
+
+        if not words:
+            return [], {}
+        language = identify_language(question)
+        last = fold(words[-1])
+        forms = {last, f"{last}s", f"{last}es", last[:-1] if last.endswith("s") else last}
+        forms |= {last[:-2]} if last.endswith("es") else set()
+        forms = {f for f in forms if len(f) >= 3}
+        head = "".join(rf"{re.escape(fold(w))}\s+" for w in words[:-1])
+        alternatives = "|".join(re.escape(f) for f in sorted(forms))
+        rx = re.compile(rf"\b{head}(?:{alternatives})\b")
+        # each word's keyword-index entry narrows the passages to look at (stop words have
+        # none: they narrow nothing)
+        keys = [[t for f in sorted(forms) for t in tokens(f)]]
+        keys += [tokens(w) for w in words[:-1]]
+        keys = [k for k in keys if k]
+        checked, found = [], {}
+        for v, index in self.rag.indexes.items():
+            if self._language(v) != language or VERSIONS[v].original:
+                continue
+            label = VERSIONS[v].label
+            checked.append(label)
+            candidates = range(len(index.passages))
+            for key in keys:
+                docs = set().union(*(index.bm25.docs_of(t).tolist() for t in key))
+                candidates = [i for i in candidates if i in docs]
+            ids = [i for i in sorted(candidates) if rx.search(index.folded[i])]
+            if ids:
+                found[label] = (len(ids), index.passages[ids[0]].reference)
+        return checked, found
+
+    def _absence_remarks(self, absence: Absence, language: str) -> list[str]:
+        """What the texts were checked for, shown above the passages."""
+        t = _TEXT[language]
+        if not absence.words:
+            return []
+        if not absence.checked:
+            return [t["not_checked"]]
+        words = absence.subject
+        if absence.found:
+            found = ", ".join(
+                f"{label} ({t['passages' if n > 1 else 'passage'].format(n=n, example=example)})"
+                for label, (n, example) in absence.found.items()
+            )
+            return [t["in_texts"].format(words=words, found=found)]
+        return [t["not_in_texts"].format(words=words, versions=_join(absence.checked, t["and"]))]
+
+    def related(self, question, language, k, versions, qvec) -> Plan:
+        """A subject the Bible doesn't name: say so, then the biblical themes closest to it
+        (themes.py), each a section with how it relates, its anchor passages and what a
+        search for it finds, in every translation. A frame (principles for deciding) is
+        added when the question asks whether something is right."""
+        t = _TEXT[language]
+        absence = self.absence(question, qvec)
+        frames = [th for th, score in self.semantics.frames(qvec) if score >= self.frame_threshold]
+        themes = self._themes(absence, max(1, self.related_themes - len(frames))) + frames
+        per, primary = max(1, k - 1), self.primary(versions)
+        sections, used = [], []
+        for theme in themes:
+            en, es = self.embedder.embed([theme.query["en"], theme.query["es"]])
+            rows = self._theme_rows(theme, primary, {"en": en, "es": es}, absence.vector, per, used)
+            self._complete(rows, versions, unit(en + es))
+            self._meaning_notes(rows, language)
+            used += rows
+            how = "related_link_frame" if theme.frame or not absence.subject else "related_link"
+            note = t[how].format(subject=absence.subject, link=theme.link[language])
+            sections.append(Section(theme.title(language), rows, note, theme.key))
+        return Plan(
+            RELATED,
+            question,
+            language,
+            versions,
+            sections,
+            queries=[th.query[language] for th in themes],
+            remarks=self._absence_remarks(absence, language),
+            absence=absence,
+            themes=[f"{th.name[language]} ({th.scope[language]})" for th in themes],
+        )
+
+    def _themes(self, absence: Absence, room: int) -> list[Theme]:
+        """The catalog themes closest to the subject: the best, and the next ones within
+        `theme_span` of it (up to `room`)."""
+        ranked = self.semantics.theme_scores(*absence.views)
+        best = ranked[0][1]
+        return [th for th, score in ranked[:room] if score >= best - self.theme_span]
+
+    def _theme_rows(self, theme: Theme, versions, aims: dict, subject, per: int, used):
+        """A theme's passages: its anchors, and the passages closest to its statement
+        (`aims`: embedded, per language), in each version; ranked by closeness to the
+        statement + `subject_weight` x closeness to the subject (anchors: + `anchor_bonus`),
+        one per chapter, none already shown."""
+        items = []  # (rank, version, hit, anchor verses)
+        for v in versions:
+            index = self.rag.indexes[v]
+            aim = aims.get(self._language(v), aims["en"])
+            closeness = index.vectors @ aim
+            rank = closeness + self.subject_weight * (index.vectors @ subject)
+            for ref in theme.anchors:
+                for book, chapter, first, last in references(ref):
+                    if (i := index.at(book, chapter, first, last, aim)) is not None:
+                        hit = Hit(index.passages[i], float(closeness[i]))
+                        items.append((float(rank[i]) + self.anchor_bonus, v, hit, (first, last)))
+            for i in np.argsort(-rank)[: 2 * per]:
+                items.append((float(rank[i]), v, Hit(index.passages[i], float(closeness[i])), None))
+        items.sort(key=lambda x: x[0], reverse=True)
+        rows = group([(v, h) for _, v, h, _ in items])
+        of = {id(h): (r, verses) for r, _, h, verses in items}
+        for row in rows:
+            row.score = max(of[id(h)][0] for h in row.hits.values())
+            verses = next((of[id(h)][1] for h in row.hits.values() if of[id(h)][1]), None)
+            if verses:  # an anchor: its key is exactly those verses
+                row.verses = verses
+                row.key = {v: h.passage.verse_text(*verses) for v, h in row.hits.items()}
+        shown = [(book_index(h.passage.book), h.passage) for r in used for h in r.hits.values()]
+        fresh = [
+            r
+            for r in rows
+            if not any(b == r.book and p.chapter == r.chapter and r.overlaps(p) for b, p in shown)
+        ]
+        return self._pick(fresh, per)

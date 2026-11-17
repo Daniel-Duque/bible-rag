@@ -113,6 +113,31 @@ def meaning():
     return MeaningEmbedder(USEEmbedder())
 
 
+@pytest.fixture(scope="session")
+def bible_vocabularies():
+    """The real vocabularies of the KJV and the RV1909 (shipped with their indexes, embedded
+    by the bundled encoder): whether the Bible has a word for a subject is a question about
+    the whole Bible, not about a test corpus."""
+    from bible_rag.config import ROOT
+    from bible_rag.index import dequantize
+
+    found = {}
+    for version in ("kjv", "rv1909"):
+        path = ROOT / "storage" / "prebuilt" / "usem3" / version / "vocabulary.npz"
+        if path.exists():
+            data = np.load(path)
+            words = data["words"].tobytes().decode().split("\n")
+            found[version] = (words, dequantize(data["codes"], data["scales"]))
+    return found
+
+
+def with_bible_vocabularies(indexes: dict, vocabularies: dict) -> dict:
+    for version, vocabulary in vocabularies.items():
+        if version in indexes:
+            indexes[version]._vocabulary = vocabulary
+    return indexes
+
+
 @pytest.fixture(autouse=True)
 def no_shipped_prebuild(monkeypatch, tmp_path_factory):
     """Tests never see the real storage/prebuilt (unless they ask for it)."""
@@ -134,13 +159,13 @@ def settings(tmp_path):
 
 
 @pytest.fixture
-def indexes(settings, meaning):
+def indexes(settings, meaning, bible_vocabularies):
     built = {}
     for version, passages in PASSAGES.items():
         manifest = {"embedder": FAKE_EMBEDDER, "source": VERSIONS[version].source}
         built[version] = VersionIndex.build(passages, meaning, manifest)
         built[version].save(settings.index_dir / embedder_key(FAKE_EMBEDDER) / version)
-    return built
+    return with_bible_vocabularies(built, bible_vocabularies)
 
 
 @pytest.fixture

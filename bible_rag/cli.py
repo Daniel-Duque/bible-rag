@@ -2,11 +2,13 @@
 
 ask "question"    one answer with checked citations. The assistant reads the question and
                   picks its task: a direct search ("Where was Jesus born?"), both sides of a
-                  contradiction ("Are there any paradoxes in the Bible about alcohol?") or a
-                  translation comparison ("How do the versions render Psalm 16:10?");
-                  --task contradiction|translation|general asks for one explicitly
+                  contradiction ("Are there any paradoxes in the Bible about alcohol?"), a
+                  translation comparison ("How do the versions render Psalm 16:10?") or, for
+                  a subject the Bible never names, the related concepts it does speak of
+                  ("Should I use a cellphone?");
+                  --task contradiction|translation|related|general asks for one explicitly
 chat              the same, as a conversation (models load once; /contradiction <question>,
-                  /translation <question> ask for a task)
+                  /translation <question>, /related <question> ask for a task)
 search "text"     retrieval only: the best passages of each translation
 versions          the Bible texts, their licenses and sources
 models [--test]   which embedders, NLI models and LLMs are usable here
@@ -60,6 +62,7 @@ _ROUTE_LABELS = {
     "general": "direct search",
     "contradiction": "contradiction search (both statements)",
     "translation": "translation comparison",
+    "related": "related concepts (not named in the Bible)",
 }
 
 
@@ -73,10 +76,10 @@ def describe_plan(plan) -> str:
     return f"[{' · '.join(parts)}]"
 
 
-TASKS = ("general", "contradiction", "translation")
+TASKS = ("general", "contradiction", "translation", "related")
 TASK_HINT = (
-    "Unsure which task this is: to compare translations or look for contradictions "
-    "instead, use {how}."
+    "Unsure which task this is: to compare translations, look for contradictions or see the "
+    "related concepts instead, use {how}."
 )
 
 
@@ -214,16 +217,17 @@ def cmd_search(args, settings):
 
 def cmd_ask(args, settings):
     question = question_of(args)
-    print_answer(load(settings), question, args, hint="--task contradiction|translation")
+    print_answer(load(settings), question, args, hint="--task contradiction|translation|related")
 
 
 CHAT_HELP = (
-    "Commands: /contradiction <question>, /translation <question>, /direct <question> "
-    "(ask for a task), /search <text>, /k <n>, /sources on|off, /quit"
+    "Commands: /contradiction <question>, /translation <question>, /related <question>, "
+    "/direct <question> (ask for a task), /search <text>, /k <n>, /sources on|off, /quit"
 )
 CHAT_TASKS = {
     "/contradiction": "contradiction",
     "/translation": "translation",
+    "/related": "related",
     "/direct": "general",
 }
 
@@ -232,8 +236,9 @@ def cmd_chat(args, settings):
     rag = load(settings)
     print(
         "Bible RAG. Ask in English or Spanish: a direct question, a contradiction "
-        "(“Are there paradoxes in the Bible about alcohol?”) or a translation comparison "
-        "(“How do the versions render Psalm 16:10?”).\n" + CHAT_HELP
+        "(“Are there paradoxes in the Bible about alcohol?”), a translation comparison "
+        "(“How do the versions render Psalm 16:10?”) or about something the Bible never "
+        "names (“Should I use a cellphone?”).\n" + CHAT_HELP
     )
     while True:
         try:
@@ -256,7 +261,10 @@ def cmd_chat(args, settings):
             print(CHAT_HELP)
         elif line:
             print_answer(
-                rag, line, args, hint="/contradiction <question> or /translation <question>"
+                rag,
+                line,
+                args,
+                hint="/contradiction, /translation or /related <question>",
             )
 
 

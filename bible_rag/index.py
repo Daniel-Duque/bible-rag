@@ -650,8 +650,7 @@ def prebuild(settings: Settings, spec: str | None = None, force: bool = False, p
     # the examples: embedded once, for this embedder
     name = f"semantics-{embedder_key(embedder.model_name)}.npz"
     semantics = Semantics(embedder, settings.prebuilt_dir / name)
-    semantics.topic_threshold  # noqa: B018 - embeds and saves every fixed text
-    semantics.axis  # noqa: B018
+    semantics.warm()  # embeds and saves every fixed text
     # the dictionary naming the original words (downloaded once from Debian)
     lexicon = json.dumps(strongs_lexicon(settings.sword_dir), ensure_ascii=False, sort_keys=True)
     target = settings.prebuilt_dir / "strongs.json.gz"

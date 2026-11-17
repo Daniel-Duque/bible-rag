@@ -9,7 +9,7 @@ from .corpus import Passage
 from .grounding import Check, Grounding
 from .index import Hit
 
-PROTOCOL = 3  # bumped on incompatible changes; client and server must agree
+PROTOCOL = 4  # bumped on incompatible changes; client and server must agree (4: "related")
 
 
 def hit_to_json(hit: Hit) -> dict:
