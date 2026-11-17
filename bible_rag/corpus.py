@@ -11,14 +11,14 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SOFT_HYPHEN = "\u00ad"  # our marker: word continues on the next line
 PDFIUM_SOFT_HYPHEN = "\ufffe"  # how pdfium reports TeX discretionary hyphens
 
 
-# Canonical order: (OSIS code, English name, Spanish name as printed in the RVR PDFs).
+# Canonical order: (OSIS code, English name, Spanish name as printed in the RVR1960).
 # fmt: off
 BOOKS = [
     ("Gen", "Genesis", "Génesis"), ("Exod", "Exodus", "Éxodo"), ("Lev", "Leviticus", "Levítico"),
@@ -65,6 +65,9 @@ class Passage:
     text: str
     page: int = 0  # 1-based PDF page (PDF sources only)
     section: str = ""  # OT | NT
+    # [[verse, character offset in text], ...]: where each verse (PDF: line) starts, so a
+    # clause can be traced to its verses and the same verses taken from another version
+    starts: list = field(default_factory=list)
 
     @property
     def reference(self) -> str:
@@ -78,7 +81,50 @@ class Passage:
         return f"{self.reference} ({self.version})"
 
     def embedding_text(self) -> str:
-        return f"{self.reference}: {self.text}"  # lets "Juan 3" style queries match too
+        # the reference lets "Juan 3" style queries match too; Hebrew / Greek lose their vowel
+        # points, cantillation and accents, which modern-language embedders don't know
+        text = strip_marks(self.text) if self.language in ORIGINAL_LANGUAGES else self.text
+        return f"{self.reference}: {text}"
+
+    def verses_in(self, start: int, end: int) -> tuple[int, int]:
+        """(first, last) verse of the characters start..end of the text (the whole passage
+        when the verse offsets are unknown)."""
+        if not self.starts:
+            return self.verse_start, self.verse_end
+        spans = [
+            (verse, offset, self.starts[i + 1][1] if i + 1 < len(self.starts) else len(self.text))
+            for i, (verse, offset) in enumerate(self.starts)
+        ]
+        inside = [v for v, a, b in spans if a < end and b > start] or [self.verse_start]
+        return min(inside), max(inside)
+
+    def verse_text(self, first: int, last: int) -> str:
+        """The text of verses first..last of this passage (all of it if offsets are unknown)."""
+        if not self.starts:
+            return self.text
+        spans = [
+            (verse, offset, self.starts[i + 1][1] if i + 1 < len(self.starts) else len(self.text))
+            for i, (verse, offset) in enumerate(self.starts)
+        ]
+        parts = [self.text[a:b] for v, a, b in spans if first <= v <= last]
+        return " ".join(p.strip() for p in parts) or self.text
+
+
+ORIGINAL_LANGUAGES = {"hbo", "grc"}  # Biblical Hebrew (and Aramaic), Koine Greek
+ISO_639_1 = {"hbo": "he", "grc": "el"}  # how embedders list the languages they know
+
+
+def embeddable(language: str, embedder) -> bool:
+    """Does the embedder know this language (True if it doesn't say)?"""
+    known = getattr(embedder, "languages", None)
+    return known is None or ISO_639_1.get(language, language) in known
+
+
+def strip_marks(text: str) -> str:
+    """Hebrew vowel points / cantillation and Greek accents removed (letters kept)."""
+    decomposed = unicodedata.normalize("NFD", text)
+    kept = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+    return unicodedata.normalize("NFC", kept.replace("\u05be", " "))  # maqaf joins words
 
 
 @dataclass
@@ -93,6 +139,8 @@ class Unit:
     page: int
     section: str
     join_next: bool = False  # ends mid-word: join the next unit without a space
+    # original-language words of the verse: [[word as written, [Strong's codes]], ...]
+    tags: list = field(default_factory=list)
 
 
 def extract_pages(pdf: Path) -> list[str]:
@@ -106,7 +154,7 @@ def extract_pages(pdf: Path) -> list[str]:
 
 
 def normalize(text: str) -> str:
-    """NFKC folds the PDFs' ligatures (ĳ -> ij, ﬁ -> fi)."""
+    """NFKC folds the PDF's ligatures (ĳ -> ij, ﬁ -> fi)."""
     return unicodedata.normalize("NFKC", text).replace("\u00a0", " ")
 
 
@@ -262,6 +310,11 @@ def chunk_units(
 
     def passage(buf: list[Unit]) -> Passage:
         u = buf[0]
+        starts = [[u.verse_start, 0]]
+        for i in range(1, len(buf)):
+            prefix = len(join_units_text(buf[:i])) + (0 if buf[i - 1].join_next else 1)
+            if buf[i].verse_start != starts[-1][0]:  # PDF lines of one verse: one start
+                starts.append([buf[i].verse_start, prefix])
         return Passage(
             label,
             language,
@@ -272,6 +325,7 @@ def chunk_units(
             join_units_text(buf),
             u.page,
             u.section,
+            starts,
         )
 
     buf, used = [], 0

@@ -64,7 +64,7 @@ def app(rag, monkeypatch):
 
 def test_app_chat(app, fake_llm):
     assert not app.exception and app.title[0].value == "📖 Bible RAG"
-    assert "Answers: `m0`" in app.sidebar.caption[0].value
+    assert "Answers: `m0 (loaded when first needed)`" in app.sidebar.caption[0].value
     app.chat_input[0].set_value("Who is my shepherd?").run()
     user, bot = app.chat_message
     assert user.markdown[0].value == "Who is my shepherd?"
@@ -89,7 +89,12 @@ def test_app_builds_missing_index_on_first_start(rag, monkeypatch):
         return rag
 
     monkeypatch.setattr(BibleRAG, "from_settings", classmethod(from_settings))
-    monkeypatch.setattr("bible_rag.index.build_indexes", lambda s: calls.append("built"))
+
+    def build(settings, progress=None):
+        progress("kjv", 512, 1024)  # the page shows the embedding's progress
+        calls.append("built")
+
+    monkeypatch.setattr("bible_rag.index.build_indexes", build)
     at = AppTest.from_file(APP, default_timeout=30).run()
     assert not at.exception and calls == ["missing", "built"]
 
@@ -102,3 +107,40 @@ def test_versions_report_and_license_refusal(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("BIBLE_RAG_INDEX_DIR", str(tmp_path))
     assert cli.main(["ingest"]) == 1
     assert "BIBLE_RAG_ALLOW_RESTRICTED" in capsys.readouterr().err
+
+
+def test_app_routes_each_question_itself(app):
+    assert not app.sidebar.radio  # no mode to choose: the assistant decides
+    app.chat_input[0].set_value("Are there contradictions in the Bible about love?").run()
+    bot = app.chat_message[-1]
+    assert not app.exception
+    assert bot.caption[0].value.startswith(
+        "⚖️ Contradiction search: the two opposite statements were searched · love and hate · "
+        "_closest to contradiction questions ("
+    )  # why it was routed there: closeness to example questions of each kind
+    assert bot.expander[0].caption[0].value.startswith("Searched for: “God is love")
+    app.chat_input[0].set_value("How do the translations render John 3:16?").run()
+    assert app.chat_message[-1].caption[0].value.startswith("🌐 Translation comparison · _closest")
+    assert "John 3:16-17 · Juan 3:16-17" in app.chat_message[-1].markdown[0].value
+
+
+def test_app_buttons_ask_the_same_question_with_another_task(app):
+    app.chat_input[0].set_value("Who is my shepherd?").run()
+    assert app.chat_message[-1].caption[0].value.startswith("🔎 Direct search")
+    # under the last answer: the two other tasks
+    assert [b.label for b in app.main.button] == [
+        "⚖️ Look for contradictions",
+        "🌐 Compare translations",
+    ]
+    app.main.button[1].click().run()
+    user, bot = app.chat_message[-2:]
+    assert user.caption[0].value == "Asked as: 🌐 Compare translations"
+    assert user.markdown[0].value == "Who is my shepherd?"
+    assert bot.caption[0].value == "🌐 Translation comparison · _as requested_"
+    assert [b.label for b in app.main.button] == [
+        "⚖️ Look for contradictions",
+        "🔎 Direct search",
+    ]
+    app.main.button[0].click().run()
+    assert app.chat_message[-1].caption[0].value.startswith("⚖️ Contradiction search")
+    assert len(app.chat_message) == 6 and not app.exception

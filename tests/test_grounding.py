@@ -1,3 +1,5 @@
+"""Citation checking: references and quotes must be in the retrieved passages."""
+
 import pytest
 
 from bible_rag.grounding import book_index, check_answer
@@ -37,7 +39,7 @@ def test_references_in_both_languages_are_verified():
         ("Juan 3:17", True),
         ("Salmo 23:1", True),
     ]
-    assert report.references[0].passage == "John 3:16-17 (KJV)"
+    assert report.references[0].location == (42, 3)  # John 3, where it was verified
     assert report.grounded
 
 
@@ -88,3 +90,23 @@ def test_short_quotes_do_not_shift_quote_pairing():
     assert [(c.text, c.supported) for c in report.quotes] == [
         ("Jehová es mi pastor; nada me faltará", True)
     ]
+
+
+def test_grounding_checks_references_and_quotes():
+    g = check_answer(
+        'As John 3:16 says (Juan 3:17); "charity suffereth long" (1 Cor. 13:4). '
+        'The word "rea" and “JEHOVA ES MI PASTOR; nada me faltara”, "John 3:16-17".',
+        HITS,
+    )
+    assert [(c.text, c.supported) for c in g.references] == [
+        ("John 3:16", True),
+        ("Juan 3:17", True),
+        ("1 Cor. 13:4", False),
+        ("John 3:16-17", True),  # a quoted reference counts as a reference
+    ]
+    assert [(c.text, c.supported) for c in g.quotes] == [
+        ("charity suffereth long", False),
+        ("JEHOVA ES MI PASTOR; nada me faltara", True),
+    ]
+    assert not g.grounded and len(g.unsupported) == 2
+    assert not check_answer("God is love.", HITS).grounded  # nothing to verify

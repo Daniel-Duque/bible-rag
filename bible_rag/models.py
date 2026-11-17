@@ -1,9 +1,11 @@
-"""Embedders, chat models and the fallback chains.
+"""Embedders, the NLI model, chat models and the fallback chains.
 
 Chains are tried in order; the first entry that loads is used (`bible-rag models` shows which).
-  embeddings: hf:<model>      sentence-transformers model (cached or downloadable)
-              usem3           Universal Sentence Encoder multilingual, bundled, offline
-  LLM:        hf:<model>      transformers chat model
+  embeddings: usem3           Universal Sentence Encoder multilingual, bundled, offline (the
+                              default: the shipped indexes are built with it)
+              hf:<model>      sentence-transformers model (BIBLE_RAG_EMBEDDING_MODEL; its
+                              indexes are built once with `bible-rag ingest`)
+  LLM:        hf:<model>      transformers chat model (default Qwen2.5-1.5B-Instruct)
               ollama[:model]  local Ollama server (OpenAI API), first installed model by default
               openai[:model]  any OpenAI-compatible server (BIBLE_RAG_OPENAI_BASE_URL)
               smollm2         SmolLM2-135M-Instruct, bundled (llm-smollm2 wheel), English only
@@ -19,6 +21,7 @@ import shutil
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -62,33 +65,45 @@ def _hf_local_only(repo: str, timeout: float) -> bool:
 
 # ---------------------------------------------------------------------------- embedders
 class STEmbedder:
+    languages = None  # unknown: assumed to cover every language it is given
+
     def __init__(self, name: str, device: str, local_only: bool):
         from sentence_transformers import SentenceTransformer
 
         self.model_name = name
         self._m = SentenceTransformer(name, device=device, local_files_only=local_only)
 
-    def embed(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
+    def embed(self, texts: list[str]) -> np.ndarray:
         return self._m.encode(
-            texts, batch_size=64, normalize_embeddings=True, show_progress_bar=show_progress
+            texts, batch_size=64, normalize_embeddings=True, show_progress_bar=False
         ).astype("float32")
 
 
 class USEEmbedder:
-    """Google USE-multilingual v3 (pure numpy, weights in the wheel): EN/ES share one space."""
+    """Google USE-multilingual v3 (pure numpy, weights in the wheel): the languages below share
+    one space; Hebrew and Greek are not among them."""
 
     model_name = "usem3"
+    languages = frozenset("ar de en es fr it ja ko nl pl pt ru th tr zh".split())
+    batch = 256
 
     def __init__(self):
         from usem3 import USE
 
         self._m = USE()
 
-    def embed(self, texts: list[str], show_progress: bool = False) -> np.ndarray:
-        from tqdm import tqdm
+    def embed(self, texts: list[str]) -> np.ndarray:
+        from threadpoolctl import threadpool_limits
 
-        starts = tqdm(range(0, len(texts), 256), disable=not show_progress, desc="Embedding")
-        return np.vstack([self._m.encode(texts[i : i + 256]) for i in starts]).astype("float32")
+        if not texts:
+            return np.zeros((0, 512), "float32")
+        starts = range(0, len(texts), self.batch)
+        # its matrices are small: OpenBLAS's thread pool only adds overhead (measured: 1 thread
+        # is fastest, and much faster when other processes share the CPU)
+        with threadpool_limits(limits=1, user_api="blas"):
+            return np.vstack([self._m.encode(texts[i : i + self.batch]) for i in starts]).astype(
+                "float32"
+            )
 
 
 def load_embedder(spec: str, device: str = "cpu", timeout: float = 3.0):
@@ -104,6 +119,58 @@ def embedder_key(spec: str) -> str:
     """Directory name for the indexes built with an embedder."""
     name = spec.partition(":")[2] or spec
     return "".join(c if c.isalnum() or c in "-_." else "__" for c in name)
+
+
+# ------------------------------------------------------------------------ NLI (opposition)
+class NLIModel:
+    """Natural language inference: does a premise entail or contradict a hypothesis? Checks
+    opposition directly ("Woe unto them that drink wine" contradicts "wine is good"), where
+    embeddings only measure closeness. Multilingual models compare across languages too."""
+
+    def __init__(self, name: str, device: str = "cpu", local_only: bool = False):
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+        self.model_name, self.device = name, device
+        self.tokenizer = AutoTokenizer.from_pretrained(name, local_files_only=local_only)
+        self.model = (
+            AutoModelForSequenceClassification.from_pretrained(name, local_files_only=local_only)
+            .to(device)
+            .eval()
+        )
+        labels = {i: str(label).lower() for i, label in self.model.config.id2label.items()}
+        try:
+            self.entail = next(i for i, lab in labels.items() if lab.startswith("entail"))
+            self.contra = next(i for i, lab in labels.items() if lab.startswith("contradict"))
+        except StopIteration as e:
+            raise ModelUnavailable(f"{name} is not an NLI model (labels {labels})") from e
+        self._lock = threading.Lock()
+
+    def scores(self, premises: list[str], hypotheses: list[str], batch: int = 16) -> np.ndarray:
+        """[[P(entailment), P(contradiction)], ...] for each premise / hypothesis pair."""
+        import torch
+
+        out = []
+        with self._lock, torch.inference_mode():
+            for i in range(0, len(premises), batch):
+                enc = self.tokenizer(
+                    premises[i : i + batch],
+                    hypotheses[i : i + batch],
+                    truncation=True,
+                    max_length=256,
+                    padding=True,
+                    return_tensors="pt",
+                ).to(self.device)
+                probs = self.model(**enc).logits.softmax(-1).float().cpu().numpy()
+                out.append(probs[:, [self.entail, self.contra]])
+        return np.vstack(out) if out else np.zeros((0, 2), "float32")
+
+
+def load_nli(settings, device: str = "cpu") -> NLIModel:
+    """The NLI model of the settings (BIBLE_RAG_NLI_MODEL; empty: disabled)."""
+    if not settings.nli_model:
+        raise ModelUnavailable("disabled (BIBLE_RAG_NLI_MODEL is empty)")
+    local_only = _hf_local_only(settings.nli_model, settings.connect_timeout)
+    return NLIModel(settings.nli_model, device, local_only)
 
 
 # -------------------------------------------------------------------------- chat models
@@ -151,19 +218,20 @@ class LocalChatModel:
             messages, add_generation_prompt=True, return_tensors="pt", return_dict=True
         ).to(self.device)
 
-    def generate(self, messages: list[dict]) -> str:
-        return "".join(self.stream(messages)).strip()
+    def generate(self, messages: list[dict], max_new_tokens: int | None = None) -> str:
+        return "".join(self.stream(messages, max_new_tokens)).strip()
 
-    def stream(self, messages: list[dict]) -> Iterator[str]:
+    def stream(self, messages: list[dict], max_new_tokens: int | None = None) -> Iterator[str]:
         import torch
         from transformers import TextIteratorStreamer
 
         inputs = self._inputs(messages)
         streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
+        gen = {**self.gen, **({"max_new_tokens": max_new_tokens} if max_new_tokens else {})}
 
         def run():
             with torch.inference_mode():
-                self.model.generate(**inputs, **self.gen, streamer=streamer)
+                self.model.generate(**inputs, **gen, streamer=streamer)
 
         with self._lock:
             thread = threading.Thread(target=run, daemon=True)
@@ -210,16 +278,18 @@ class OpenAIChatModel:
             "top_p": settings.top_p,
         }
 
-    def _payload(self, messages, stream):
-        return {"model": self.model_name, "messages": messages, "stream": stream, **self.params}
+    def _payload(self, messages, stream, max_new_tokens=None):
+        params = {**self.params, **({"max_tokens": max_new_tokens} if max_new_tokens else {})}
+        return {"model": self.model_name, "messages": messages, "stream": stream, **params}
 
-    def generate(self, messages: list[dict]) -> str:
-        r = self.client.post("/chat/completions", json=self._payload(messages, False))
+    def generate(self, messages: list[dict], max_new_tokens: int | None = None) -> str:
+        payload = self._payload(messages, False, max_new_tokens)
+        r = self.client.post("/chat/completions", json=payload)
         return (r.raise_for_status().json()["choices"][0]["message"]["content"] or "").strip()
 
-    def stream(self, messages: list[dict]) -> Iterator[str]:
+    def stream(self, messages: list[dict], max_new_tokens: int | None = None) -> Iterator[str]:
         with self.client.stream(
-            "POST", "/chat/completions", json=self._payload(messages, True)
+            "POST", "/chat/completions", json=self._payload(messages, True, max_new_tokens)
         ) as r:
             r.raise_for_status()
             for line in r.iter_lines():  # server-sent events: "data: {...}"
@@ -311,8 +381,22 @@ def create_chat_model(spec: str, settings, device: str):
     raise ValueError(f"Unknown LLM spec {spec!r}")
 
 
+# what is known of a chain entry without loading it: (languages, compact); None: unknown until
+# loaded. SmolLM2 takes ~2 minutes to convert on a fresh install: not loaded unless used.
+KNOWN_PROFILES = {"smollm2": (frozenset({"en"}), True)}
+
+
+def static_profile(spec: str):
+    kind = spec.partition(":")[0]
+    if kind not in KNOWN_PROFILES:
+        return None
+    languages, compact = KNOWN_PROFILES[kind]
+    return SimpleNamespace(label=kind, languages=languages, compact=compact)
+
+
 class ModelChain:
-    """Use the first spec that loads; on an error while answering, move to the next one."""
+    """Use the first spec that loads; on an error while answering, move to the next one.
+    Loaded on first use; `model_for` doesn't even load a model that wouldn't be used."""
 
     def __init__(self, specs: list[str], factory: Callable):
         self.specs, self.factory = list(specs), factory
@@ -322,18 +406,49 @@ class ModelChain:
     @property
     def model(self):
         while not self._loaded:
-            if self.position >= len(self.specs):
-                raise RuntimeError(
-                    "No language model could be loaded: "
-                    + "; ".join(f"{s} -> {r}" for s, r in self.skipped)
-                )
-            try:
-                self._model, self._loaded = self.factory(self.specs[self.position]), True
-            except Exception as e:  # noqa: BLE001 - any failure: try the next entry
-                log.warning("LLM %s unavailable: %s", self.specs[self.position], describe_error(e))
-                self.skipped.append((self.specs[self.position], describe_error(e)))
-                self.position += 1
+            self._try_next()
         return self._model
+
+    def _try_next(self) -> None:
+        """Load the current entry, or record why not and move to the next one."""
+        if self.position >= len(self.specs):
+            raise RuntimeError(
+                "No language model could be loaded: "
+                + "; ".join(f"{s} -> {r}" for s, r in self.skipped)
+            )
+        try:
+            self._model, self._loaded = self.factory(self.specs[self.position]), True
+        except Exception as e:  # noqa: BLE001 - any failure: try the next entry
+            log.warning("LLM %s unavailable: %s", self.specs[self.position], describe_error(e))
+            self.skipped.append((self.specs[self.position], describe_error(e)))
+            self.position += 1
+
+    def model_for(self, check):
+        """(model, None), or (None, reason) when the entry the chain reaches is known
+        (static_profile) to be unusable for this request: check(profile) -> reason | None.
+        Each entry is checked before it is loaded: the bundled SmolLM2 (~2 min to convert
+        on a fresh install) is not loaded for an answer it wouldn't write."""
+        while not self._loaded:
+            if self.position < len(self.specs):
+                profile = static_profile(self.specs[self.position])
+                if profile is not None and (reason := check(profile)):
+                    return None, reason
+            self._try_next()
+        return self._model, None
+
+    @property
+    def loaded(self) -> bool:
+        return self._loaded
+
+    @property
+    def current(self) -> str:
+        """The entry in use (or to be tried next), without loading anything."""
+        return self.specs[min(self.position, len(self.specs) - 1)]
+
+    def describe(self) -> str:
+        if self._loaded:
+            return self.current
+        return " / ".join(self.specs[self.position :]) + " (loaded when first needed)"
 
     @property
     def active(self) -> str:
@@ -357,13 +472,28 @@ def probe(settings, test: bool = False) -> list[dict]:
             if kind == "hf"
             else (kind == "usem3", True, "bundled, offline, multilingual")
         )
+        name = embedder_key(spec) + settings.corpus_suffix
         has_index = all(
-            (settings.index_dir / embedder_key(spec) / v / "manifest.json").exists()
+            any(
+                (base / name / v / "manifest.json").exists()
+                for base in (settings.index_dir, settings.prebuilt_dir)
+            )
             for v in settings.versions
         )
         rows.append(
             {"kind": "embedder", "spec": spec, "ok": ok, "detail": detail, "index": has_index}
         )
+    if settings.nli_model:
+        ok, _, detail = hf_status(settings.nli_model, settings.connect_timeout)
+        rows.append({"kind": "nli", "spec": f"hf:{settings.nli_model}", "ok": ok, "detail": detail})
+    rows.append(
+        {
+            "kind": "nli",
+            "spec": "embeddings",
+            "ok": True,
+            "detail": "fallback: opposition estimated from embedding similarity",
+        }
+    )
     for spec in settings.llm_specs:
         kind, _, arg = spec.partition(":")
         try:

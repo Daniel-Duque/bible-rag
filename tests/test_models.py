@@ -61,6 +61,57 @@ def test_unreachable_models_fail_fast(settings, monkeypatch):
         create_chat_model("gpt-9", settings, "cpu")
 
 
+def test_default_chains(settings):
+    settings.embedding_chain, settings.llm_chain = (), ()
+    assert settings.embedding_specs == ["usem3"]  # the embedder of the shipped indexes
+    settings.embedding_model = "sentence-transformers/LaBSE"
+    assert settings.embedding_specs == ["hf:sentence-transformers/LaBSE", "usem3"]
+    assert settings.llm_specs == [
+        f"hf:{settings.llm_model}",
+        "ollama",
+        "openai",
+        "smollm2",
+        "extractive",
+    ]
+
+
+def test_from_settings_uses_the_first_llm_that_loads(settings, indexes, meaning, monkeypatch):
+    from bible_rag.rag import BibleRAG
+
+    from .conftest import FakeLLM
+
+    llm = FakeLLM()
+    monkeypatch.setattr("bible_rag.rag.open_indexes", lambda s: (meaning, indexes, "fake", []))
+
+    def create(spec, settings, device):
+        if spec.startswith("hf:"):
+            raise ModelUnavailable("Hugging Face unreachable")
+        return llm
+
+    monkeypatch.setattr("bible_rag.rag.create_chat_model", create)
+    settings.llm_chain = ("hf:Qwen/Qwen2.5-1.5B-Instruct", "smollm2")
+    rag = BibleRAG.from_settings(settings)
+    assert rag.chain.active == "smollm2"
+    answer = rag.ask("In the beginning God created", k=1)
+    assert answer.model == "smollm2" and llm.calls
+    assert "Fallback LLM smollm2 in use (hf:Qwen/Qwen2.5-1.5B-Instruct" in answer.notes[0]
+
+
+def test_models_command(monkeypatch, capsys, tmp_path):
+    from bible_rag import cli
+
+    for name in ("BIBLE_RAG_LLM_CHAIN", "BIBLE_RAG_EMBEDDING_CHAIN", "BIBLE_RAG_NLI_MODEL"):
+        monkeypatch.delenv(name, raising=False)  # the defaults are under test
+    monkeypatch.setenv("BIBLE_RAG_INDEX_DIR", str(tmp_path))
+    monkeypatch.setenv("BIBLE_RAG_OLLAMA_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setattr(models, "hf_status", lambda repo, t: (False, False, "unreachable"))
+    assert cli.main(["models"]) == 0
+    out = capsys.readouterr().out
+    assert "✓ usem3  <- will be used" in out and "✓ smollm2  <- will be used" in out
+    assert "✗ hf:Qwen/Qwen2.5-1.5B-Instruct" in out and "not built (bible-rag ingest)" in out
+    assert "Opposition check (NLI) models" in out and "✓ embeddings  <- will be used" in out
+
+
 def test_probe_and_bundled_fallbacks(settings, monkeypatch):
     monkeypatch.setattr(models, "hf_status", lambda repo, t: (False, False, "unreachable"))
     settings.embedding_chain = ("hf:some/model", "usem3")
@@ -159,3 +210,63 @@ def test_bundled_smollm2_runs(settings):
     reply = m.generate([{"role": "user", "content": "Who built the ark?"}])
     assert len(reply.split()) >= 3 and "<|im_end|>" not in reply
     assert (settings.model_cache_dir / "SmolLM2-135M-Instruct" / "model.safetensors").exists()
+
+
+@pytest.mark.hf
+def test_cli_end_to_end_with_real_model_code(tiny, tmp_path, monkeypatch, capsys):
+    """ingest -> ask through the CLI, with the real transformers / sentence-transformers code
+    (tiny random models, so only the plumbing is checked)."""
+    from bible_rag import cli
+    from bible_rag.corpus import Unit
+
+    from .conftest import PASSAGES
+
+    units = {
+        v: [Unit(p.book, p.chapter, p.verse_start, p.verse_end, p.text, 0, "NT") for p in ps]
+        for v, ps in PASSAGES.items()
+    }
+    monkeypatch.setattr("bible_rag.index.load_units", lambda v, s: units[v])
+    monkeypatch.setenv("BIBLE_RAG_INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("BIBLE_RAG_VERSIONS", "kjv,rv1909")
+    monkeypatch.setenv("BIBLE_RAG_NLI_MODEL", "")
+    monkeypatch.setenv("BIBLE_RAG_EMBEDDING_CHAIN", f"hf:{tiny['embedder']}")
+    monkeypatch.setenv("BIBLE_RAG_LLM_CHAIN", f"hf:{tiny['llm']}")
+    monkeypatch.setenv("BIBLE_RAG_MAX_NEW_TOKENS", "5")
+    monkeypatch.setenv("BIBLE_RAG_DEVICE", "cpu")
+    assert cli.main(["ingest"]) == 0
+    assert "kjv: 3 passages" in capsys.readouterr().out
+    assert cli.main(["ask", "-k", "1", "god love world"]) == 0
+    out = capsys.readouterr().out
+    assert "Sources:" in out and "(KJV)" in out and "(RV1909)" in out
+    assert f"Answered by: hf:{tiny['llm']}" in out
+
+
+@pytest.mark.hf
+def test_nli_model_runs(tmp_path, settings):
+    """Plumbing only (random weights): labels are found by name, probabilities come out."""
+    from transformers import BertConfig, BertForSequenceClassification, BertTokenizerFast
+
+    (tmp_path / "vocab.txt").write_text("\n".join(["[PAD]", "[UNK]", "[CLS]", "[SEP]", *WORDS]))
+    BertTokenizerFast(str(tmp_path / "vocab.txt")).save_pretrained(tmp_path)
+    config = BertConfig(
+        vocab_size=len(WORDS) + 4,
+        hidden_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=32,
+        num_labels=3,
+        id2label={0: "ENTAILMENT", 1: "neutral", 2: "contradiction"},
+    )
+    BertForSequenceClassification(config).save_pretrained(tmp_path)
+    settings.nli_model = str(tmp_path)
+    nli = models.load_nli(settings)
+    scores = nli.scores(["god love world", "dios amor"], ["the world", "mundo"])
+    assert scores.shape == (2, 2) and ((scores >= 0) & (scores <= 1)).all()
+    config.id2label = {0: "positive", 1: "negative"}
+    config.num_labels = 2
+    BertForSequenceClassification(config).save_pretrained(tmp_path)
+    with pytest.raises(ModelUnavailable, match="not an NLI model"):
+        models.load_nli(settings)
+    settings.nli_model = ""
+    with pytest.raises(ModelUnavailable, match="disabled"):
+        models.load_nli(settings)

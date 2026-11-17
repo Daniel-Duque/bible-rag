@@ -1,4 +1,5 @@
-"""Parsers: synthetic pages reproducing each PDF layout, then the real PDFs (marker `pdf`)."""
+"""Text model and chunking, and the RVR1960 PDF parser: synthetic pages reproducing its layout,
+then the real PDF (marker `pdf`, skipped when data/biblia-reina-valera-1960.pdf is absent)."""
 
 from collections import defaultdict
 
@@ -20,11 +21,6 @@ from bible_rag.corpus import (
 from bible_rag.sources import load_units
 
 # ----------------------------------------------------------------------------- helpers
-
-
-def kjv_page(body: str, footer: str, page: int = 1) -> str:
-    # pdfium repeats the running title: "<title>\n<page>\n<title>"
-    return f"{body}\n{footer}\n{page}\n{footer}"
 
 
 RVR_TOC = """Libros del Antiguo Testamento
@@ -232,3 +228,26 @@ def test_rvr1960_pdf_matches_the_kjv_versification():
         assert not any(c in p.text for c in "\ufffe\u00ad\u0133\ufb01"), p.citation
         if p.chapter == 1 and p.verse_start == 1:  # no book title leaked into the text
             assert not any(t in p.text[:80].lower() for t in TITLES), p.citation
+
+
+def test_verse_offsets_trace_a_clause_to_its_verses():
+    from bible_rag.corpus import strip_marks
+
+    units = [
+        Unit("John", 3, v, v, t, 0, "NT")
+        for v, t in [
+            (16, "For God so loved the world,"),
+            (17, "For God sent not his Son"),
+            (18, "He that believeth on him"),
+        ]
+    ]
+    p = next(chunk_units(units, "KJV", "en", 450, 80))
+    assert p.starts == [[16, 0], [17, 28], [18, 53]]
+    i = p.text.index("sent")
+    assert p.verses_in(i, i + 4) == (17, 17) and p.verses_in(0, len(p.text)) == (16, 18)
+    assert p.verse_text(17, 18) == "For God sent not his Son He that believeth on him"
+    old = Passage("KJV", "en", "John", 3, 16, 18, p.text)  # an index without offsets
+    assert old.verses_in(5, 9) == (16, 18) and old.verse_text(17, 17) == p.text
+    assert strip_marks("בְּרֵאשִׁ֖ית ἐν ἀρχῇ") == "בראשית εν αρχη"
+    greek = Passage("SBLGNT", "grc", "John", 1, 1, 1, "Ἐν ἀρχῇ ἦν ὁ λόγος")
+    assert greek.embedding_text() == "John 1:1: Εν αρχη ην ο λογος"  # marks off for embedders
